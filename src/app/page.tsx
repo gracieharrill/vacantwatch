@@ -19,6 +19,8 @@ import {
   type PropertySignal,
 } from "../components/property-data";
 
+const PAGE_SIZE = 100;
+
 const Map = dynamic(
   () => import("../components/Map"),
   {
@@ -31,6 +33,23 @@ const Map = dynamic(
     ),
   }
 );
+
+type PaginationInfo = {
+  limit: number;
+  offset: number;
+  nextOffset: number;
+  totalProperties: number;
+  propertiesRequested: number;
+  propertiesReturned: number;
+  hasMoreProperties: boolean;
+};
+
+type PropertyPageResponse = {
+  properties: Property[];
+  count: number;
+  pagination: PaginationInfo;
+  error?: string;
+};
 
 const signals: PropertySignal[] = [
   "vacant",
@@ -88,9 +107,46 @@ const numberFormatter =
 function getPropertySignals(
   property: Property
 ): PropertySignal[] {
-  return property.signals?.length > 0
+  return property.signals?.length
     ? property.signals
     : [property.status];
+}
+
+async function fetchPropertyPage(
+  offset: number,
+  signal?: AbortSignal
+): Promise<PropertyPageResponse> {
+  const response = await fetch(
+    `/api/properties?limit=${PAGE_SIZE}&offset=${offset}`,
+    {
+      signal,
+      cache: "no-store",
+    }
+  );
+
+  const data =
+    (await response.json()) as PropertyPageResponse;
+
+  if (!response.ok) {
+    throw new Error(
+      data.error ||
+        "Unable to load properties"
+    );
+  }
+
+  if (!Array.isArray(data.properties)) {
+    throw new Error(
+      "The property API returned invalid data"
+    );
+  }
+
+  if (!data.pagination) {
+    throw new Error(
+      "The property API returned no pagination information"
+    );
+  }
+
+  return data;
 }
 
 export default function Home() {
@@ -100,8 +156,29 @@ export default function Home() {
   const [loading, setLoading] =
     useState(true);
 
+  const [loadingMore, setLoadingMore] =
+    useState(false);
+
   const [error, setError] =
     useState("");
+
+  const [
+    loadMoreError,
+    setLoadMoreError,
+  ] = useState("");
+
+  const [nextOffset, setNextOffset] =
+    useState(0);
+
+  const [
+    hasMoreProperties,
+    setHasMoreProperties,
+  ] = useState(false);
+
+  const [
+    totalProperties,
+    setTotalProperties,
+  ] = useState<number | null>(null);
 
   const [searchQuery, setSearchQuery] =
     useState("");
@@ -139,43 +216,37 @@ export default function Home() {
     });
 
   /*
-   * Load map and list records.
+   * Load the first page.
    */
   useEffect(() => {
     const controller =
       new AbortController();
 
-    async function loadProperties() {
+    async function loadInitialProperties() {
       try {
         setLoading(true);
         setError("");
 
-        const response = await fetch(
-          "/api/properties",
-          {
-            signal: controller.signal,
-            cache: "no-store",
-          }
-        );
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          throw new Error(
-            data.error ||
-              "Unable to load properties"
+        const data =
+          await fetchPropertyPage(
+            0,
+            controller.signal
           );
-        }
-
-        if (
-          !Array.isArray(data.properties)
-        ) {
-          throw new Error(
-            "The property API returned invalid data"
-          );
-        }
 
         setProperties(data.properties);
+
+        setNextOffset(
+          data.pagination.nextOffset
+        );
+
+        setHasMoreProperties(
+          data.pagination
+            .hasMoreProperties
+        );
+
+        setTotalProperties(
+          data.pagination.totalProperties
+        );
       } catch (requestError) {
         if (
           requestError instanceof
@@ -200,7 +271,7 @@ export default function Home() {
       }
     }
 
-    loadProperties();
+    loadInitialProperties();
 
     return () => {
       controller.abort();
@@ -208,7 +279,7 @@ export default function Home() {
   }, []);
 
   /*
-   * Read a parcel from the URL.
+   * Read a parcel ID from the URL.
    */
   useEffect(() => {
     const parameters =
@@ -228,7 +299,7 @@ export default function Home() {
   }, []);
 
   /*
-   * Keep the selection in the URL.
+   * Keep the selected parcel in the URL.
    */
   useEffect(() => {
     const url =
@@ -253,7 +324,8 @@ export default function Home() {
   }, [selectedPropertyId]);
 
   /*
-   * Load the complete selected record.
+   * Load complete details for the
+   * selected parcel.
    */
   useEffect(() => {
     if (!selectedPropertyId) {
@@ -266,7 +338,7 @@ export default function Home() {
     const controller =
       new AbortController();
 
-    async function loadDetail() {
+    async function loadPropertyDetail() {
       try {
         setDetailLoading(true);
         setDetailError("");
@@ -280,7 +352,8 @@ export default function Home() {
           }
         );
 
-        const data = await response.json();
+        const data =
+          await response.json();
 
         if (!response.ok) {
           throw new Error(
@@ -322,7 +395,7 @@ export default function Home() {
       }
     }
 
-    loadDetail();
+    loadPropertyDetail();
 
     return () => {
       controller.abort();
@@ -412,10 +485,6 @@ export default function Home() {
       ]
     );
 
-  /*
-   * Clear a selected list parcel if
-   * the filters or search hide it.
-   */
   useEffect(() => {
     if (
       loading ||
@@ -442,6 +511,81 @@ export default function Home() {
     selectedPropertyId,
   ]);
 
+  async function loadMoreProperties() {
+    if (
+      loadingMore ||
+      !hasMoreProperties
+    ) {
+      return;
+    }
+
+    try {
+      setLoadingMore(true);
+      setLoadMoreError("");
+
+      const data =
+        await fetchPropertyPage(
+          nextOffset
+        );
+
+      /*
+       * Merge the page by parcel ID so that
+       * duplicates cannot appear.
+       */
+      setProperties((current) => {
+        const propertiesById =
+          new globalThis.Map<
+            string,
+            Property
+          >();
+
+        for (const property of current) {
+          propertiesById.set(
+            property.id,
+            property
+          );
+        }
+
+        for (
+          const property of
+          data.properties
+        ) {
+          propertiesById.set(
+            property.id,
+            property
+          );
+        }
+
+        return Array.from(
+          propertiesById.values()
+        );
+      });
+
+      setNextOffset(
+        data.pagination.nextOffset
+      );
+
+      setHasMoreProperties(
+        data.pagination
+          .hasMoreProperties
+      );
+
+      setTotalProperties(
+        data.pagination.totalProperties
+      );
+    } catch (requestError) {
+      console.error(requestError);
+
+      setLoadMoreError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Unable to load more properties"
+      );
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
   function toggleFilter(
     signal: PropertySignal
   ) {
@@ -459,7 +603,7 @@ export default function Home() {
     );
   }
 
-  function clearSelection() {
+  function clearSelectedProperty() {
     setSelectedPropertyId(null);
     setPropertyDetail(null);
     setDetailError("");
@@ -490,9 +634,24 @@ export default function Home() {
             <span>
               {loading
                 ? "Loading..."
-                : `${filteredProperties.length} of ${properties.length}`}
+                : `${filteredProperties.length} shown`}
             </span>
           </div>
+
+          {!loading &&
+            totalProperties !== null && (
+              <div className="mt-1 text-xs text-slate-400">
+                Loaded{" "}
+                {numberFormatter.format(
+                  properties.length
+                )}{" "}
+                of{" "}
+                {numberFormatter.format(
+                  totalProperties
+                )}{" "}
+                tax parcels
+              </div>
+            )}
         </header>
 
         <div className="p-4">
@@ -507,7 +666,7 @@ export default function Home() {
                   event.target.value
                 )
               }
-              placeholder="Search address or parcel..."
+              placeholder="Search loaded parcels..."
               className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
@@ -573,8 +732,9 @@ export default function Home() {
             filteredProperties.length ===
               0 && (
               <div className="p-4 text-sm text-slate-500">
-                No properties match the
-                current search and filters.
+                No loaded properties match
+                the current search and
+                filters.
               </div>
             )}
 
@@ -640,6 +800,36 @@ export default function Home() {
                 );
               }
             )}
+
+          {!loading && !error && (
+            <div className="p-4">
+              {loadMoreError && (
+                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {loadMoreError}
+                </div>
+              )}
+
+              {hasMoreProperties ? (
+                <button
+                  type="button"
+                  onClick={
+                    loadMoreProperties
+                  }
+                  disabled={loadingMore}
+                  className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+                >
+                  {loadingMore
+                    ? "Loading more..."
+                    : "Load More Properties"}
+                </button>
+              ) : (
+                <div className="text-center text-sm text-slate-500">
+                  All available properties
+                  have been loaded.
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </aside>
 
@@ -664,7 +854,7 @@ export default function Home() {
                   Property details
                 </div>
 
-                <h2 className="mt-1 text-xl font-bold text-slate-900">
+                <h2 className="mt-1 truncate text-xl font-bold text-slate-900">
                   {displayedDetail?.address ??
                     `Parcel ${selectedPropertyId}`}
                 </h2>
@@ -678,7 +868,7 @@ export default function Home() {
               <button
                 type="button"
                 onClick={
-                  clearSelection
+                  clearSelectedProperty
                 }
                 className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
                 aria-label="Close property details"
@@ -1004,30 +1194,30 @@ export default function Home() {
                           <tbody className="divide-y divide-slate-100 bg-white">
                             {propertyDetail.taxRecords.map(
                               (
-                                record,
+                                taxRecord,
                                 index
                               ) => (
                                 <tr
-                                  key={`${record.billYear}-${record.levyCode}-${record.receivableType}-${index}`}
+                                  key={`${taxRecord.billYear}-${taxRecord.levyCode}-${taxRecord.receivableType}-${index}`}
                                 >
-                                  <td className="whitespace-nowrap px-3 py-3">
-                                    {record.billYear ??
+                                  <td className="whitespace-nowrap px-3 py-3 text-slate-700">
+                                    {taxRecord.billYear ??
                                       "—"}
                                   </td>
 
-                                  <td className="whitespace-nowrap px-3 py-3">
-                                    {record.receivableType ??
+                                  <td className="whitespace-nowrap px-3 py-3 text-slate-700">
+                                    {taxRecord.receivableType ??
                                       "—"}
                                   </td>
 
-                                  <td className="whitespace-nowrap px-3 py-3">
-                                    {record.levyCode ??
+                                  <td className="whitespace-nowrap px-3 py-3 text-slate-700">
+                                    {taxRecord.levyCode ??
                                       "—"}
                                   </td>
 
-                                  <td className="whitespace-nowrap px-3 py-3 text-right font-medium">
+                                  <td className="whitespace-nowrap px-3 py-3 text-right font-medium text-slate-900">
                                     {currencyFormatter.format(
-                                      record.outstandingAmount
+                                      taxRecord.outstandingAmount
                                     )}
                                   </td>
                                 </tr>
