@@ -14,7 +14,51 @@ const PARCEL_GEOMETRY_URL =
 const PARCEL_ATTRIBUTES_URL =
   "https://services.arcgis.com/ZOyb2t4B0UYuYNYH/ArcGIS/rest/services/King_County_Tax_Parcel_Centroids_with_select_City_of_Seattle_geographic_overlays/FeatureServer/0/query";
 
-type TaxRecord = {
+const TAX_BATCH_SIZE = 5000;
+const MAX_TAX_ROWS = 200000;
+const ARCGIS_BATCH_SIZE = 75;
+
+const TAX_SELECT_FIELDS = [
+  "account_number",
+  "account_status",
+  "levy_code",
+  "tax_status",
+  "receivable_type",
+  "bill_year",
+  "billed_amount",
+  "paid_amount",
+].join(",");
+
+const ASSESSOR_FIELDS = [
+  "PIN",
+  "ADDRESS",
+  "PROP_NAME",
+  "PARCEL_SQFT",
+  "LAND_SQFT",
+  "LAND_USE_CODE",
+  "PRES_USE",
+  "PUB_OWN_TYPE",
+  "BLDG_GRSS_SQFT",
+  "LAND_AV",
+  "BLDG_AV",
+  "YEAR_BUILT",
+  "ZONING",
+  "LAT",
+  "LON",
+].join(",");
+
+export type PropertyQueryOptions = {
+  limit?: number;
+  offset?: number;
+};
+
+type TaxFetchOptions = {
+  limit: number;
+  offset: number;
+  pin?: string;
+};
+
+type TaxRow = {
   account_number?: string;
   account_status?: string;
   levy_code?: string;
@@ -29,105 +73,98 @@ type TaxAggregate = {
   pin: string;
   billedCents: number;
   paidCents: number;
-  rows: number;
   billYears: Set<string>;
+  recordCount: number;
+  records: TaxRecordDetail[];
 };
 
-type ParcelGeometryFeature = {
-  attributes?: {
-    PIN?: string;
-    MAJOR?: string;
-    MINOR?: string;
+type ParcelGeometryAttributes = {
+  PIN?: string;
+  MAJOR?: string;
+  MINOR?: string;
+};
+
+type ParcelGeometry = {
+  rings?: number[][][];
+};
+
+type ParcelAssessorAttributes = {
+  PIN?: string;
+  ADDRESS?: string;
+  PROP_NAME?: string;
+  PARCEL_SQFT?: number | string;
+  LAND_SQFT?: number | string;
+  LAND_USE_CODE?: number | string;
+  PRES_USE?: string;
+  PUB_OWN_TYPE?: string;
+  BLDG_GRSS_SQFT?: number | string;
+  LAND_AV?: number | string;
+  BLDG_AV?: number | string;
+  YEAR_BUILT?: number | string;
+  ZONING?: string;
+  LAT?: number | string;
+  LON?: number | string;
+};
+
+type ArcGisFeature<
+  TAttributes,
+  TGeometry = unknown,
+> = {
+  attributes?: TAttributes;
+  geometry?: TGeometry;
+};
+
+type ArcGisResponse<
+  TAttributes,
+  TGeometry = unknown,
+> = {
+  features?: Array<
+    ArcGisFeature<TAttributes, TGeometry>
+  >;
+
+  error?: {
+    code?: number;
+    message?: string;
+    details?: string[];
   };
-
-  geometry?: {
-    rings?: number[][][];
-  };
 };
 
-type ParcelAttributeFeature = {
-  attributes?: {
-    PIN?: string;
-    ADDRESS?: string;
-    PROP_NAME?: string;
-
-    PARCEL_SQFT?: number;
-    LAND_SQFT?: number;
-
-    LAND_USE_CODE?: number;
-    PRES_USE?: string;
-    PUB_OWN_TYPE?: string;
-
-    BLDG_GRSS_SQFT?: number;
-
-    LAND_AV?: number;
-    BLDG_AV?: number;
-
-    YEAR_BUILT?: string | number;
-    ZONING?: string;
-
-    LAT?: number;
-    LON?: number;
-  };
-};
-
-type ParcelAttributes = NonNullable<
-  ParcelAttributeFeature["attributes"]
->;
-
-type PropertyQueryOptions = {
-  limit?: number;
-  offset?: number;
-};
-
-function normalizeDigits(value: unknown): string {
-  return String(value ?? "").replace(/\D/g, "");
-}
-
+/*
+ * Convert a parcel number or 12-digit tax account number
+ * into a 10-digit King County PIN.
+ *
+ * Tax account example:
+ * 000740015306
+ *
+ * Parcel PIN:
+ * 0007400153
+ */
 export function normalizePin(
   value: unknown
 ): string | null {
-  const normalized = normalizeDigits(value);
-
-  if (normalized.length !== 10) {
-    return null;
-  }
-
-  return normalized;
-}
-
-function accountNumberToPin(
-  accountNumber: unknown
-): string | null {
-  const normalized = normalizeDigits(accountNumber);
-
-  if (normalized.length < 10) {
-    return null;
-  }
-
-  return normalized.slice(0, 10);
-}
-
-function parseCents(value: unknown): number {
-  const normalized = String(value ?? "").replace(
-    /[^\d-]/g,
+  const digits = String(value ?? "").replace(
+    /\D/g,
     ""
   );
 
-  const amount = Number.parseInt(normalized, 10);
+  if (digits.length < 10) {
+    return null;
+  }
 
-  return Number.isFinite(amount) ? amount : 0;
+  return digits.slice(0, 10);
 }
 
-function cleanText(
+function cleanString(
   value: unknown
 ): string | undefined {
-  const text = String(value ?? "").trim();
+  const result = String(value ?? "").trim();
 
-  return text.length > 0 ? text : undefined;
+  return result.length > 0
+    ? result
+    : undefined;
 }
 
-function optionalNumber(
+function numberOrUndefined(
   value: unknown
 ): number | undefined {
   if (
@@ -138,25 +175,60 @@ function optionalNumber(
     return undefined;
   }
 
-  const numberValue = Number(value);
+  const result = Number(value);
 
-  return Number.isFinite(numberValue)
-    ? numberValue
+  return Number.isFinite(result)
+    ? result
     : undefined;
 }
 
-function optionalYear(
+function integerOrUndefined(
   value: unknown
 ): number | undefined {
-  const normalized = String(value ?? "").trim();
+  const result = numberOrUndefined(value);
 
-  if (!/^\d{4}$/.test(normalized)) {
+  if (result === undefined) {
     return undefined;
   }
 
-  const year = Number.parseInt(normalized, 10);
+  return Math.round(result);
+}
 
-  return year > 0 ? year : undefined;
+function yearOrUndefined(
+  value: unknown
+): number | undefined {
+  const result = integerOrUndefined(value);
+
+  if (
+    result === undefined ||
+    result <= 0
+  ) {
+    return undefined;
+  }
+
+  return result;
+}
+
+/*
+ * King County stores the tax amounts as integer cents
+ * inside text fields.
+ */
+function parseCents(value: unknown): number {
+  const result = Number(
+    String(value ?? "").trim()
+  );
+
+  if (!Number.isFinite(result)) {
+    return 0;
+  }
+
+  return Math.round(result);
+}
+
+function centsToDollars(
+  cents: number
+): number {
+  return Math.round(cents) / 100;
 }
 
 function chunkArray<T>(
@@ -170,20 +242,153 @@ function chunkArray<T>(
     index < values.length;
     index += size
   ) {
-    chunks.push(values.slice(index, index + size));
+    chunks.push(
+      values.slice(index, index + size)
+    );
   }
 
   return chunks;
 }
 
+async function fetchJson<T>(
+  url: string,
+  description: string
+): Promise<T> {
+  const response = await fetch(url, {
+    next: {
+      revalidate: 3600,
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `${description} failed with status ${response.status}`
+    );
+  }
+
+  return (await response.json()) as T;
+}
+
+function assertNoArcGisError(
+  response: {
+    error?: {
+      code?: number;
+      message?: string;
+      details?: string[];
+    };
+  },
+  description: string
+): void {
+  if (!response.error) {
+    return;
+  }
+
+  const details =
+    response.error.details
+      ?.filter(Boolean)
+      .join("; ") ?? "";
+
+  throw new Error(
+    [
+      `${description} failed`,
+      response.error.message,
+      details,
+    ]
+      .filter(Boolean)
+      .join(": ")
+  );
+}
+
+async function fetchTaxRecords({
+  limit,
+  offset,
+  pin,
+}: TaxFetchOptions): Promise<TaxRow[]> {
+  const parameters =
+    new URLSearchParams({
+      $select: TAX_SELECT_FIELDS,
+
+      $order: [
+        "account_number ASC",
+        "bill_year ASC",
+        "levy_code ASC",
+        "receivable_type ASC",
+        "billed_amount ASC",
+        "paid_amount ASC",
+      ].join(","),
+
+      $limit: String(limit),
+      $offset: String(offset),
+    });
+
+  if (pin) {
+    /*
+     * The tax account begins with the 10-digit parcel PIN
+     * and normally ends with a two-digit account suffix.
+     */
+    parameters.set(
+      "$where",
+      `account_number like '${pin}%'`
+    );
+  }
+
+  return fetchJson<TaxRow[]>(
+    `${DELINQUENT_TAX_URL}?${parameters.toString()}`,
+    "King County delinquent-tax request"
+  );
+}
+
+/*
+ * Fetch every tax row before parcel pagination.
+ *
+ * This prevents a parcel's individual tax rows from being
+ * divided between two different API pages.
+ */
+async function fetchAllTaxRecords(): Promise<{
+  records: TaxRow[];
+  truncated: boolean;
+}> {
+  const records: TaxRow[] = [];
+
+  for (
+    let offset = 0;
+    offset < MAX_TAX_ROWS;
+    offset += TAX_BATCH_SIZE
+  ) {
+    const batch =
+      await fetchTaxRecords({
+        limit: TAX_BATCH_SIZE,
+        offset,
+      });
+
+    records.push(...batch);
+
+    if (batch.length < TAX_BATCH_SIZE) {
+      return {
+        records,
+        truncated: false,
+      };
+    }
+  }
+
+  return {
+    records,
+    truncated: true,
+  };
+}
+
 function aggregateTaxRecords(
-  taxRecords: TaxRecord[]
+  records: TaxRow[]
 ): Map<string, TaxAggregate> {
   const taxByPin =
     new Map<string, TaxAggregate>();
 
-  for (const record of taxRecords) {
-    const pin = accountNumberToPin(
+  for (const record of records) {
+    /*
+     * The correct parcel PIN is the FIRST 10 digits
+     * of the 12-digit tax account number.
+     */
+    const pin = normalizePin(
       record.account_number
     );
 
@@ -191,134 +396,296 @@ function aggregateTaxRecords(
       continue;
     }
 
-    const existing = taxByPin.get(pin) ?? {
-      pin,
-      billedCents: 0,
-      paidCents: 0,
-      rows: 0,
-      billYears: new Set<string>(),
-    };
-
-    existing.billedCents += parseCents(
+    const billedCents = parseCents(
       record.billed_amount
     );
 
-    existing.paidCents += parseCents(
+    const paidCents = parseCents(
       record.paid_amount
     );
 
-    existing.rows += 1;
+    const outstandingCents = Math.max(
+      0,
+      billedCents - paidCents
+    );
 
-    if (record.bill_year) {
-      existing.billYears.add(record.bill_year);
+    let aggregate = taxByPin.get(pin);
+
+    if (!aggregate) {
+      aggregate = {
+        pin,
+        billedCents: 0,
+        paidCents: 0,
+        billYears: new Set<string>(),
+        recordCount: 0,
+        records: [],
+      };
+
+      taxByPin.set(pin, aggregate);
     }
 
-    taxByPin.set(pin, existing);
+    aggregate.billedCents += billedCents;
+    aggregate.paidCents += paidCents;
+    aggregate.recordCount += 1;
+
+    const billYear = cleanString(
+      record.bill_year
+    );
+
+    if (billYear) {
+      aggregate.billYears.add(billYear);
+    }
+
+    aggregate.records.push({
+      billYear,
+      levyCode: cleanString(
+        record.levy_code
+      ),
+      receivableType: cleanString(
+        record.receivable_type
+      ),
+      taxStatus: cleanString(
+        record.tax_status
+      ),
+      billedAmount:
+        centsToDollars(billedCents),
+      paidAmount:
+        centsToDollars(paidCents),
+      outstandingAmount:
+        centsToDollars(
+          outstandingCents
+        ),
+    });
   }
 
   return taxByPin;
 }
 
-function calculateGeometryCenter(
-  geometry: ParcelGeometryFeature["geometry"]
-): { lat: number; lng: number } | null {
-  const points = geometry?.rings?.flat() ?? [];
+function createPinWhereClause(
+  pins: string[]
+): string {
+  return pins
+    .map((pin) => `PIN='${pin}'`)
+    .join(" OR ");
+}
 
-  const validPoints = points.filter(
-    (point) =>
-      Array.isArray(point) &&
-      Number.isFinite(point[0]) &&
-      Number.isFinite(point[1])
+async function fetchParcelGeometry(
+  pins: string[]
+): Promise<
+  Array<
+    ArcGisFeature<
+      ParcelGeometryAttributes,
+      ParcelGeometry
+    >
+  >
+> {
+  if (pins.length === 0) {
+    return [];
+  }
+
+  const features: Array<
+    ArcGisFeature<
+      ParcelGeometryAttributes,
+      ParcelGeometry
+    >
+  > = [];
+
+  const batches = chunkArray(
+    pins,
+    ARCGIS_BATCH_SIZE
   );
 
-  if (validPoints.length === 0) {
+  for (const batch of batches) {
+    const parameters =
+      new URLSearchParams({
+        where:
+          createPinWhereClause(batch),
+
+        outFields:
+          "PIN,MAJOR,MINOR",
+
+        returnGeometry: "true",
+        outSR: "4326",
+        f: "json",
+      });
+
+    const response =
+      await fetchJson<
+        ArcGisResponse<
+          ParcelGeometryAttributes,
+          ParcelGeometry
+        >
+      >(
+        `${PARCEL_GEOMETRY_URL}?${parameters.toString()}`,
+        "King County parcel-geometry request"
+      );
+
+    assertNoArcGisError(
+      response,
+      "King County parcel-geometry request"
+    );
+
+    features.push(
+      ...(response.features ?? [])
+    );
+  }
+
+  return features;
+}
+
+function chooseBetterAssessorRecord(
+  existing:
+    | ParcelAssessorAttributes
+    | undefined,
+  candidate: ParcelAssessorAttributes
+): ParcelAssessorAttributes {
+  if (!existing) {
+    return candidate;
+  }
+
+  const existingHasAddress =
+    Boolean(
+      cleanString(existing.ADDRESS)
+    );
+
+  const candidateHasAddress =
+    Boolean(
+      cleanString(candidate.ADDRESS)
+    );
+
+  if (
+    !existingHasAddress &&
+    candidateHasAddress
+  ) {
+    return candidate;
+  }
+
+  return existing;
+}
+
+async function fetchParcelAttributes(
+  pins: string[]
+): Promise<
+  Map<string, ParcelAssessorAttributes>
+> {
+  const attributesByPin =
+    new Map<
+      string,
+      ParcelAssessorAttributes
+    >();
+
+  if (pins.length === 0) {
+    return attributesByPin;
+  }
+
+  const batches = chunkArray(
+    pins,
+    ARCGIS_BATCH_SIZE
+  );
+
+  for (const batch of batches) {
+    const parameters =
+      new URLSearchParams({
+        where:
+          createPinWhereClause(batch),
+
+        outFields: ASSESSOR_FIELDS,
+        returnGeometry: "false",
+        f: "json",
+      });
+
+    const response =
+      await fetchJson<
+        ArcGisResponse<
+          ParcelAssessorAttributes
+        >
+      >(
+        `${PARCEL_ATTRIBUTES_URL}?${parameters.toString()}`,
+        "King County assessor request"
+      );
+
+    assertNoArcGisError(
+      response,
+      "King County assessor request"
+    );
+
+    for (
+      const feature of
+      response.features ?? []
+    ) {
+      const attributes =
+        feature.attributes;
+
+      const pin = normalizePin(
+        attributes?.PIN
+      );
+
+      if (!pin || !attributes) {
+        continue;
+      }
+
+      attributesByPin.set(
+        pin,
+        chooseBetterAssessorRecord(
+          attributesByPin.get(pin),
+          attributes
+        )
+      );
+    }
+  }
+
+  return attributesByPin;
+}
+
+function getPolygonCenter(
+  geometry:
+    | ParcelGeometry
+    | undefined
+): {
+  lat: number;
+  lng: number;
+} | null {
+  const rings = geometry?.rings;
+
+  if (!rings?.length) {
     return null;
   }
 
-  const longitudes = validPoints.map(
-    (point) => point[0]
-  );
+  let latitudeTotal = 0;
+  let longitudeTotal = 0;
+  let pointCount = 0;
 
-  const latitudes = validPoints.map(
-    (point) => point[1]
-  );
+  for (const ring of rings) {
+    for (const point of ring) {
+      const longitude = point?.[0];
+      const latitude = point?.[1];
+
+      if (
+        !Number.isFinite(longitude) ||
+        !Number.isFinite(latitude)
+      ) {
+        continue;
+      }
+
+      longitudeTotal += longitude;
+      latitudeTotal += latitude;
+      pointCount += 1;
+    }
+  }
+
+  if (pointCount === 0) {
+    return null;
+  }
 
   return {
-    lng:
-      (Math.min(...longitudes) +
-        Math.max(...longitudes)) /
-      2,
-
-    lat:
-      (Math.min(...latitudes) +
-        Math.max(...latitudes)) /
-      2,
+    lat: latitudeTotal / pointCount,
+    lng: longitudeTotal / pointCount,
   };
 }
 
-function getMarkerPoint(
-  geometry: ParcelGeometryFeature["geometry"],
-  attributes?: ParcelAttributes
-): { lat: number; lng: number } | null {
-  const attributeLat = optionalNumber(
-    attributes?.LAT
-  );
-
-  const attributeLng = optionalNumber(
-    attributes?.LON
-  );
-
-  if (
-    attributeLat !== undefined &&
-    attributeLng !== undefined
-  ) {
-    return {
-      lat: attributeLat,
-      lng: attributeLng,
-    };
-  }
-
-  return calculateGeometryCenter(geometry);
-}
-
-function determineSignals({
-  presentUse,
-  buildingSquareFeet,
-}: {
-  presentUse?: string;
-  buildingSquareFeet?: number;
-}): PropertySignal[] {
-  const signals = new Set<PropertySignal>();
-
-  /*
-   * Every property in this adapter came from the
-   * delinquent-tax data source.
-   */
-  signals.add("tax-delinquent");
-
-  const normalizedPresentUse =
-    presentUse?.toLowerCase() ?? "";
-
-  const assessorSaysVacant =
-    normalizedPresentUse.includes("vacant");
-
-  const hasNoBuilding =
-    buildingSquareFeet === 0;
-
-  if (assessorSaysVacant || hasNoBuilding) {
-    signals.add("vacant");
-  }
-
-  return Array.from(signals);
-}
-
-function determinePrimaryStatus(
+function getPrimarySignal(
   signals: PropertySignal[]
 ): PropertySignal {
-  /*
-   * Higher-priority signals appear first.
-   * This controls the map marker and main label.
-   */
   const priority: PropertySignal[] = [
     "blighted",
     "vacant",
@@ -333,296 +700,114 @@ function determinePrimaryStatus(
   );
 }
 
-async function fetchTaxRecords({
-  limit,
-  offset,
-  pin,
-}: {
-  limit: number;
-  offset: number;
-  pin?: string;
-}): Promise<TaxRecord[]> {
-  const params = new URLSearchParams({
-    $limit: String(limit),
-    $offset: String(offset),
-    $order: "account_number ASC, bill_year ASC",
-  });
-
-  if (pin) {
-    params.set(
-      "$where",
-      `account_number like '${pin}%'`
-    );
-  }
-
-  const response = await fetch(
-    `${DELINQUENT_TAX_URL}?${params.toString()}`,
-    {
-      next: {
-        revalidate: 3600,
-      },
-    }
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Delinquent-tax request failed with ${response.status}`
-    );
-  }
-
-  const data = await response.json();
-
-  if (!Array.isArray(data)) {
-    throw new Error(
-      "The delinquent-tax API returned an invalid response"
-    );
-  }
-
-  return data as TaxRecord[];
-}
-
-async function fetchParcelGeometry(
-  pins: string[]
-): Promise<ParcelGeometryFeature[]> {
-  if (pins.length === 0) {
-    return [];
-  }
-
-  const features: ParcelGeometryFeature[] = [];
-  const batches = chunkArray(pins, 40);
-
-  for (const batch of batches) {
-    const validPins = batch
-      .map(normalizePin)
-      .filter(
-        (pin): pin is string => pin !== null
-      );
-
-    if (validPins.length === 0) {
-      continue;
-    }
-
-    const where = validPins
-      .map((pin) => `PIN='${pin}'`)
-      .join(" OR ");
-
-    const params = new URLSearchParams({
-      where,
-      outFields: "PIN,MAJOR,MINOR",
-      returnGeometry: "true",
-      outSR: "4326",
-      geometryPrecision: "6",
-      resultRecordCount: String(
-        validPins.length
-      ),
-      f: "json",
-    });
-
-    const response = await fetch(
-      `${PARCEL_GEOMETRY_URL}?${params.toString()}`,
-      {
-        next: {
-          revalidate: 3600,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `Parcel geometry request failed with ${response.status}`
-      );
-    }
-
-    const data = await response.json();
-
-    if (data.error) {
-      throw new Error(
-        `Parcel geometry error ${data.error.code}: ${data.error.message}`
-      );
-    }
-
-    if (Array.isArray(data.features)) {
-      features.push(...data.features);
-    }
-  }
-
-  return features;
-}
-
-async function fetchParcelAttributes(
-  pins: string[]
-): Promise<Map<string, ParcelAttributes>> {
-  const attributesByPin =
-    new Map<string, ParcelAttributes>();
-
-  if (pins.length === 0) {
-    return attributesByPin;
-  }
-
-  const batches = chunkArray(pins, 40);
-
-  for (const batch of batches) {
-    const validPins = batch
-      .map(normalizePin)
-      .filter(
-        (pin): pin is string => pin !== null
-      );
-
-    if (validPins.length === 0) {
-      continue;
-    }
-
-    const where = validPins
-      .map((pin) => `PIN='${pin}'`)
-      .join(" OR ");
-
-    const params = new URLSearchParams({
-      where,
-
-      outFields: [
-        "PIN",
-        "ADDRESS",
-        "PROP_NAME",
-        "PARCEL_SQFT",
-        "LAND_SQFT",
-        "LAND_USE_CODE",
-        "PRES_USE",
-        "PUB_OWN_TYPE",
-        "BLDG_GRSS_SQFT",
-        "LAND_AV",
-        "BLDG_AV",
-        "YEAR_BUILT",
-        "ZONING",
-        "LAT",
-        "LON",
-      ].join(","),
-
-      returnGeometry: "false",
-
-      resultRecordCount: String(
-        validPins.length
-      ),
-
-      f: "json",
-    });
-
-    const response = await fetch(
-      `${PARCEL_ATTRIBUTES_URL}?${params.toString()}`,
-      {
-        next: {
-          revalidate: 3600,
-        },
-      }
-    );
-
-    /*
-     * Attribute enrichment is optional.
-     * Tax and geometry data should still work if this layer fails.
-     */
-    if (!response.ok) {
-      console.warn(
-        `Parcel attributes request failed with ${response.status}`
-      );
-
-      continue;
-    }
-
-    const data = await response.json();
-
-    if (data.error) {
-      console.warn(
-        `Parcel attributes error ${data.error.code}: ${data.error.message}`
-      );
-
-      continue;
-    }
-
-    const features: ParcelAttributeFeature[] =
-      Array.isArray(data.features)
-        ? data.features
-        : [];
-
-    for (const feature of features) {
-      const pin = normalizePin(
-        feature.attributes?.PIN
-      );
-
-      if (pin && feature.attributes) {
-        attributesByPin.set(
-          pin,
-          feature.attributes
-        );
-      }
-    }
-  }
-
-  return attributesByPin;
-}
-
 function featureToProperty(
-  feature: ParcelGeometryFeature,
-  taxByPin: Map<string, TaxAggregate>,
+  feature: ArcGisFeature<
+    ParcelGeometryAttributes,
+    ParcelGeometry
+  >,
+  taxByPin: Map<
+    string,
+    TaxAggregate
+  >,
   attributesByPin: Map<
     string,
-    ParcelAttributes
+    ParcelAssessorAttributes
   >
 ): Property | null {
+  const geometryAttributes =
+    feature.attributes ?? {};
+
   const pin = normalizePin(
-    feature.attributes?.PIN
+    geometryAttributes.PIN ??
+      `${geometryAttributes.MAJOR ?? ""}${geometryAttributes.MINOR ?? ""}`
   );
 
   if (!pin) {
     return null;
   }
 
-  const tax = taxByPin.get(pin);
+  const taxAggregate =
+    taxByPin.get(pin);
 
-  if (!tax) {
+  if (!taxAggregate) {
     return null;
   }
 
-  const attributes = attributesByPin.get(pin);
-
-  const markerPoint = getMarkerPoint(
-    feature.geometry,
-    attributes
+  const center = getPolygonCenter(
+    feature.geometry
   );
 
-  if (!markerPoint) {
+  if (!center) {
     return null;
   }
+
+  const assessor =
+    attributesByPin.get(pin);
 
   const major =
-    feature.attributes?.MAJOR ??
-    pin.slice(0, 6);
+    cleanString(
+      geometryAttributes.MAJOR
+    ) ?? pin.slice(0, 6);
 
   const minor =
-    feature.attributes?.MINOR ??
-    pin.slice(6);
+    cleanString(
+      geometryAttributes.MINOR
+    ) ?? pin.slice(6, 10);
 
-  const assessorAddress = cleanText(
-    attributes?.ADDRESS
-  );
+  const propertyName =
+    cleanString(
+      assessor?.PROP_NAME
+    );
 
-  const propertyName = cleanText(
-    attributes?.PROP_NAME
-  );
+  const presentUse =
+    cleanString(
+      assessor?.PRES_USE
+    );
 
-  const presentUse = cleanText(
-    attributes?.PRES_USE
-  );
+  const ownershipType =
+    cleanString(
+      assessor?.PUB_OWN_TYPE
+    );
 
-  const buildingSquareFeet = optionalNumber(
-    attributes?.BLDG_GRSS_SQFT
-  );
+  const zoning =
+    cleanString(
+      assessor?.ZONING
+    );
 
-  const landValue = optionalNumber(
-    attributes?.LAND_AV
-  );
+  const parcelSquareFeet =
+    integerOrUndefined(
+      assessor?.PARCEL_SQFT
+    );
 
-  const buildingValue = optionalNumber(
-    attributes?.BLDG_AV
-  );
+  const landSquareFeet =
+    integerOrUndefined(
+      assessor?.LAND_SQFT
+    );
+
+  const buildingSquareFeet =
+    integerOrUndefined(
+      assessor?.BLDG_GRSS_SQFT
+    );
+
+  const landUseCode =
+    integerOrUndefined(
+      assessor?.LAND_USE_CODE
+    );
+
+  const landValue =
+    integerOrUndefined(
+      assessor?.LAND_AV
+    );
+
+  const buildingValue =
+    integerOrUndefined(
+      assessor?.BLDG_AV
+    );
+
+  const yearBuilt =
+    yearOrUndefined(
+      assessor?.YEAR_BUILT
+    );
 
   const totalAssessedValue =
     landValue !== undefined ||
@@ -631,33 +816,55 @@ function featureToProperty(
         (buildingValue ?? 0)
       : undefined;
 
-  const signals = determineSignals({
-    presentUse,
-    buildingSquareFeet,
-  });
+  const signals: PropertySignal[] = [
+    "tax-delinquent",
+  ];
+
+  const vacantByUse =
+    presentUse
+      ?.toLowerCase()
+      .includes("vacant") ?? false;
+
+  const vacantByBuildingArea =
+    buildingSquareFeet === 0;
+
+  if (
+    vacantByUse ||
+    vacantByBuildingArea
+  ) {
+    signals.push("vacant");
+  }
 
   const primaryStatus =
-    determinePrimaryStatus(signals);
+    getPrimarySignal(signals);
 
   const outstandingCents = Math.max(
     0,
-    tax.billedCents - tax.paidCents
+    taxAggregate.billedCents -
+      taxAggregate.paidCents
   );
+
+  const address =
+    cleanString(assessor?.ADDRESS) ??
+    `Parcel ${major}-${minor}`;
+
+  const billYears = Array.from(
+    taxAggregate.billYears
+  ).sort((first, second) => {
+    return (
+      Number(first) - Number(second)
+    );
+  });
 
   return {
     id: pin,
-
-    address:
-      assessorAddress ??
-      propertyName ??
-      `Parcel ${major}-${minor}`,
-
-    lat: markerPoint.lat,
-    lng: markerPoint.lng,
+    address,
+    lat: center.lat,
+    lng: center.lng,
 
     /*
-     * status keeps the current frontend working.
-     * signals contains all applicable conditions.
+     * status remains for compatibility with
+     * the existing map and page components.
      */
     status: primaryStatus,
     primaryStatus,
@@ -665,116 +872,157 @@ function featureToProperty(
 
     major,
     minor,
-
     propertyName,
     presentUse,
-
-    landUseCode: optionalNumber(
-      attributes?.LAND_USE_CODE
-    ),
-
-    ownershipType: cleanText(
-      attributes?.PUB_OWN_TYPE
-    ),
-
-    parcelSquareFeet: optionalNumber(
-      attributes?.PARCEL_SQFT
-    ),
-
-    landSquareFeet: optionalNumber(
-      attributes?.LAND_SQFT
-    ),
-
+    landUseCode,
+    ownershipType,
+    parcelSquareFeet,
+    landSquareFeet,
     buildingSquareFeet,
-
     landValue,
     buildingValue,
     totalAssessedValue,
-
-    yearBuilt: optionalYear(
-      attributes?.YEAR_BUILT
-    ),
-
-    zoning: cleanText(
-      attributes?.ZONING
-    ),
+    yearBuilt,
+    zoning,
 
     billedAmount:
-      tax.billedCents / 100,
+      centsToDollars(
+        taxAggregate.billedCents
+      ),
 
     paidAmount:
-      tax.paidCents / 100,
+      centsToDollars(
+        taxAggregate.paidCents
+      ),
 
     outstandingAmount:
-      outstandingCents / 100,
+      centsToDollars(
+        outstandingCents
+      ),
 
-    billYears: Array.from(
-      tax.billYears
-    ).sort(
-      (first, second) =>
-        Number(first) - Number(second)
-    ),
+    billYears,
 
-    taxRecordCount: tax.rows,
+    taxRecordCount:
+      taxAggregate.recordCount,
   };
 }
 
-function taxRecordToDetail(
-  record: TaxRecord
-): TaxRecordDetail {
-  const billedCents = parseCents(
-    record.billed_amount
+function sortTaxRecords(
+  records: TaxRecordDetail[]
+): TaxRecordDetail[] {
+  return [...records].sort(
+    (first, second) => {
+      const yearDifference =
+        Number(
+          second.billYear ?? 0
+        ) -
+        Number(
+          first.billYear ?? 0
+        );
+
+      if (yearDifference !== 0) {
+        return yearDifference;
+      }
+
+      return String(
+        first.receivableType ?? ""
+      ).localeCompare(
+        String(
+          second.receivableType ?? ""
+        )
+      );
+    }
   );
-
-  const paidCents = parseCents(
-    record.paid_amount
-  );
-
-  return {
-    billYear: record.bill_year,
-    levyCode: record.levy_code,
-    receivableType:
-      record.receivable_type,
-    taxStatus: record.tax_status,
-
-    billedAmount:
-      billedCents / 100,
-
-    paidAmount:
-      paidCents / 100,
-
-    outstandingAmount:
-      Math.max(
-        0,
-        billedCents - paidCents
-      ) / 100,
-  };
 }
 
+/*
+ * Return a page of complete property records.
+ *
+ * limit and offset refer to properties, not individual
+ * delinquent-tax rows.
+ */
 export async function getProperties(
   options: PropertyQueryOptions = {}
 ) {
   const limit = Math.min(
-    Math.max(options.limit ?? 1000, 1),
-    5000
+    Math.max(
+      Math.floor(options.limit ?? 100),
+      1
+    ),
+    500
   );
 
   const offset = Math.max(
-    options.offset ?? 0,
+    Math.floor(options.offset ?? 0),
     0
   );
 
-  const taxRecords =
-    await fetchTaxRecords({
-      limit,
-      offset,
-    });
+  /*
+   * First collect and aggregate every tax row.
+   */
+  const {
+    records: taxRecords,
+    truncated: taxRowsTruncated,
+  } = await fetchAllTaxRecords();
 
-  const taxByPin =
+  const completeTaxByPin =
     aggregateTaxRecords(taxRecords);
 
-  const pins = Array.from(
-    taxByPin.keys()
+  /*
+   * Sort complete parcel totals before slicing the page.
+   */
+  const orderedTaxAggregates =
+    Array.from(
+      completeTaxByPin.values()
+    ).sort((first, second) => {
+      const firstOutstanding =
+        Math.max(
+          0,
+          first.billedCents -
+            first.paidCents
+        );
+
+      const secondOutstanding =
+        Math.max(
+          0,
+          second.billedCents -
+            second.paidCents
+        );
+
+      const amountDifference =
+        secondOutstanding -
+        firstOutstanding;
+
+      if (amountDifference !== 0) {
+        return amountDifference;
+      }
+
+      return first.pin.localeCompare(
+        second.pin
+      );
+    });
+
+  /*
+   * Apply pagination only after parcel aggregation.
+   */
+  const pageAggregates =
+    orderedTaxAggregates.slice(
+      offset,
+      offset + limit
+    );
+
+  const pageTaxByPin =
+    new Map<string, TaxAggregate>(
+      pageAggregates.map(
+        (aggregate) => [
+          aggregate.pin,
+          aggregate,
+        ]
+      )
+    );
+
+  const pins = pageAggregates.map(
+    (aggregate) => aggregate.pin
   );
 
   const [
@@ -785,31 +1033,44 @@ export async function getProperties(
     fetchParcelAttributes(pins),
   ]);
 
-  const matchedPins = new Set<string>();
+  const propertyByPin =
+    new Map<string, Property>();
 
-  const properties = parcelGeometry
-    .map((feature) => {
-      const property = featureToProperty(
+  for (
+    const feature of parcelGeometry
+  ) {
+    const property =
+      featureToProperty(
         feature,
-        taxByPin,
+        pageTaxByPin,
         attributesByPin
       );
 
-      if (property) {
-        matchedPins.add(property.id);
-      }
+    if (property) {
+      propertyByPin.set(
+        property.id,
+        property
+      );
+    }
+  }
 
-      return property;
-    })
-    .filter(
-      (property): property is Property =>
-        property !== null
-    )
-    .sort(
-      (first, second) =>
-        (second.outstandingAmount ?? 0) -
-        (first.outstandingAmount ?? 0)
+  const properties = Array.from(
+    propertyByPin.values()
+  ).sort((first, second) => {
+    return (
+      (second.outstandingAmount ?? 0) -
+      (first.outstandingAmount ?? 0)
     );
+  });
+
+  const matchedPins = new Set(
+    properties.map(
+      (property) => property.id
+    )
+  );
+
+  const nextOffset =
+    offset + pageAggregates.length;
 
   return {
     properties,
@@ -818,12 +1079,25 @@ export async function getProperties(
     pagination: {
       limit,
       offset,
+      nextOffset,
 
-      taxRowsReturned:
+      totalProperties:
+        orderedTaxAggregates.length,
+
+      propertiesRequested:
+        pageAggregates.length,
+
+      propertiesReturned:
+        properties.length,
+
+      hasMoreProperties:
+        nextOffset <
+        orderedTaxAggregates.length,
+
+      taxRowsScanned:
         taxRecords.length,
 
-      hasMoreTaxRows:
-        taxRecords.length === limit,
+      taxRowsTruncated,
     },
 
     source: {
@@ -838,7 +1112,11 @@ export async function getProperties(
     },
 
     debug: {
-      uniquePins: pins.length,
+      totalUniquePins:
+        completeTaxByPin.size,
+
+      pagePins:
+        pins.length,
 
       parcelFeaturesReturned:
         parcelGeometry.length,
@@ -850,31 +1128,36 @@ export async function getProperties(
         properties.length,
 
       vacantProperties:
-        properties.filter((property) =>
-          property.signals.includes("vacant")
+        properties.filter(
+          (property) =>
+            property.signals.includes(
+              "vacant"
+            )
         ).length,
 
       taxDelinquentProperties:
-        properties.filter((property) =>
-          property.signals.includes(
-            "tax-delinquent"
-          )
+        properties.filter(
+          (property) =>
+            property.signals.includes(
+              "tax-delinquent"
+            )
         ).length,
 
-      unmatchedPins: pins
-        .filter(
-          (pin) =>
-            !matchedPins.has(pin)
-        )
-        .slice(0, 20),
+      unmatchedPins: pins.filter(
+        (pin) =>
+          !matchedPins.has(pin)
+      ),
     },
   };
 }
 
+/*
+ * Return the complete record for one parcel.
+ */
 export async function getPropertyById(
-  rawPin: string
+  value: string
 ): Promise<PropertyDetail | null> {
-  const pin = normalizePin(rawPin);
+  const pin = normalizePin(value);
 
   if (!pin) {
     return null;
@@ -882,17 +1165,20 @@ export async function getPropertyById(
 
   const taxRecords =
     await fetchTaxRecords({
-      pin,
-      limit: 500,
+      limit: 5000,
       offset: 0,
+      pin,
     });
-
-  if (taxRecords.length === 0) {
-    return null;
-  }
 
   const taxByPin =
     aggregateTaxRecords(taxRecords);
+
+  const taxAggregate =
+    taxByPin.get(pin);
+
+  if (!taxAggregate) {
+    return null;
+  }
 
   const [
     parcelGeometry,
@@ -902,56 +1188,37 @@ export async function getPropertyById(
     fetchParcelAttributes([pin]),
   ]);
 
-  const parcelFeature =
-    parcelGeometry.find(
-      (feature) =>
-        normalizePin(
-          feature.attributes?.PIN
-        ) === pin
-    );
+  let property:
+    | Property
+    | null = null;
 
-  if (!parcelFeature) {
-    return null;
+  for (
+    const feature of parcelGeometry
+  ) {
+    const candidate =
+      featureToProperty(
+        feature,
+        taxByPin,
+        attributesByPin
+      );
+
+    if (
+      candidate?.id === pin
+    ) {
+      property = candidate;
+      break;
+    }
   }
-
-  const property = featureToProperty(
-    parcelFeature,
-    taxByPin,
-    attributesByPin
-  );
 
   if (!property) {
     return null;
   }
 
-  const detailedTaxRecords =
-    taxRecords
-      .map(taxRecordToDetail)
-      .sort((first, second) => {
-        const yearDifference =
-          Number(
-            first.billYear ?? 0
-          ) -
-          Number(
-            second.billYear ?? 0
-          );
-
-        if (yearDifference !== 0) {
-          return yearDifference;
-        }
-
-        return String(
-          first.receivableType ?? ""
-        ).localeCompare(
-          String(
-            second.receivableType ?? ""
-          )
-        );
-      });
-
   return {
     ...property,
-    taxRecords:
-      detailedTaxRecords,
+
+    taxRecords: sortTaxRecords(
+      taxAggregate.records
+    ),
   };
 }
