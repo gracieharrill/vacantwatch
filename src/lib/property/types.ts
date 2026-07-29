@@ -4,18 +4,24 @@ export type PropertySignal =
   | "blighted"
   | "potential";
 
+export type PropertyStatus = PropertySignal;
+
 export type Property = {
   id: string;
   address: string;
   lat: number;
   lng: number;
 
-  signals: PropertySignal[];
+  /*
+   * Kept for compatibility with the page and map.
+   */
+  status: PropertyStatus;
+
   primaryStatus: PropertySignal;
+  signals: PropertySignal[];
 
   major?: string;
   minor?: string;
-
   propertyName?: string;
   presentUse?: string;
   landUseCode?: number;
