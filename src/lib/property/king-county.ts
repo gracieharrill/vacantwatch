@@ -18,6 +18,12 @@ const TAX_BATCH_SIZE = 5000;
 const MAX_TAX_ROWS = 200000;
 const ARCGIS_BATCH_SIZE = 50;
 
+/*
+ * Reuse the complete aggregated tax index for one hour.
+ */
+const TAX_CACHE_TTL_MS =
+  60 * 60 * 1000;
+
 const TAX_SELECT_FIELDS = [
   "account_number",
   "account_status",
@@ -78,6 +84,21 @@ type TaxAggregate = {
   records: TaxRecordDetail[];
 };
 
+type TaxIndex = {
+  taxByPin: Map<string, TaxAggregate>;
+  orderedTaxAggregates: TaxAggregate[];
+  taxRowsScanned: number;
+  taxRowsTruncated: boolean;
+  generatedAt: number;
+  expiresAt: number;
+};
+
+type TaxCacheStatus =
+  | "hit"
+  | "miss"
+  | "shared-build"
+  | "stale";
+
 type ParcelGeometryAttributes = {
   PIN?: string;
   MAJOR?: string;
@@ -132,11 +153,23 @@ type ArcGisResponse<
   };
 };
 
+/*
+ * These module-level values remain available while
+ * the current Node.js server process is running.
+ */
+let cachedTaxIndex:
+  | TaxIndex
+  | null = null;
+
+let taxIndexBuildPromise:
+  | Promise<TaxIndex>
+  | null = null;
+
 /**
  * Convert a parcel number or tax account number
  * into a 10-digit King County parcel PIN.
  *
- * Example tax account:
+ * Tax account:
  * 000740015306
  *
  * Parcel PIN:
@@ -215,7 +248,7 @@ function yearOrUndefined(
   return result;
 }
 
-/**
+/*
  * King County delinquent-tax money fields
  * are represented as integer cents.
  */
@@ -294,9 +327,9 @@ async function fetchJson<T>(
   return (await response.json()) as T;
 }
 
-/**
- * ArcGIS queries use POST instead of putting the
- * entire PIN filter into a long URL.
+/*
+ * ArcGIS queries use POST so the PIN filters
+ * do not create excessively long URLs.
  */
 async function fetchArcGisJson<T>(
   url: string,
@@ -412,10 +445,6 @@ async function fetchTaxRecords({
   );
 }
 
-/**
- * Fetch every delinquent-tax row before
- * paginating complete parcel records.
- */
 async function fetchAllTaxRecords(): Promise<{
   records: TaxRow[];
   truncated: boolean;
@@ -452,8 +481,15 @@ async function fetchAllTaxRecords(): Promise<{
   };
 }
 
+/*
+ * includeRecordDetails is false for the large list cache,
+ * reducing memory use.
+ *
+ * It is true for one-property detail requests.
+ */
 function aggregateTaxRecords(
-  records: TaxRow[]
+  records: TaxRow[],
+  includeRecordDetails: boolean
 ): Map<string, TaxAggregate> {
   const taxByPin =
     new Map<
@@ -525,42 +561,205 @@ function aggregateTaxRecords(
       );
     }
 
-    aggregate.records.push({
-      billYear,
+    if (includeRecordDetails) {
+      aggregate.records.push({
+        billYear,
 
-      levyCode:
-        cleanString(
-          record.levy_code
-        ),
+        levyCode:
+          cleanString(
+            record.levy_code
+          ),
 
-      receivableType:
-        cleanString(
-          record.receivable_type
-        ),
+        receivableType:
+          cleanString(
+            record.receivable_type
+          ),
 
-      taxStatus:
-        cleanString(
-          record.tax_status
-        ),
+        taxStatus:
+          cleanString(
+            record.tax_status
+          ),
 
-      billedAmount:
-        centsToDollars(
-          billedCents
-        ),
+        billedAmount:
+          centsToDollars(
+            billedCents
+          ),
 
-      paidAmount:
-        centsToDollars(
-          paidCents
-        ),
+        paidAmount:
+          centsToDollars(
+            paidCents
+          ),
 
-      outstandingAmount:
-        centsToDollars(
-          outstandingCents
-        ),
-    });
+        outstandingAmount:
+          centsToDollars(
+            outstandingCents
+          ),
+      });
+    }
   }
 
   return taxByPin;
+}
+
+function sortTaxAggregates(
+  taxByPin: Map<
+    string,
+    TaxAggregate
+  >
+): TaxAggregate[] {
+  return Array.from(
+    taxByPin.values()
+  ).sort(
+    (first, second) => {
+      const firstOutstanding =
+        Math.max(
+          0,
+          first.billedCents -
+            first.paidCents
+        );
+
+      const secondOutstanding =
+        Math.max(
+          0,
+          second.billedCents -
+            second.paidCents
+        );
+
+      const amountDifference =
+        secondOutstanding -
+        firstOutstanding;
+
+      if (
+        amountDifference !== 0
+      ) {
+        return amountDifference;
+      }
+
+      return first.pin.localeCompare(
+        second.pin
+      );
+    }
+  );
+}
+
+async function buildTaxIndex(): Promise<TaxIndex> {
+  console.info(
+    "[VacantWatch] Building tax index..."
+  );
+
+  const {
+    records,
+    truncated,
+  } = await fetchAllTaxRecords();
+
+  const taxByPin =
+    aggregateTaxRecords(
+      records,
+      false
+    );
+
+  const generatedAt =
+    Date.now();
+
+  const index: TaxIndex = {
+    taxByPin,
+
+    orderedTaxAggregates:
+      sortTaxAggregates(
+        taxByPin
+      ),
+
+    taxRowsScanned:
+      records.length,
+
+    taxRowsTruncated:
+      truncated,
+
+    generatedAt,
+
+    expiresAt:
+      generatedAt +
+      TAX_CACHE_TTL_MS,
+  };
+
+  console.info(
+    `[VacantWatch] Tax index ready: ${index.taxRowsScanned} rows, ${index.taxByPin.size} parcels`
+  );
+
+  return index;
+}
+
+async function getTaxIndex(): Promise<{
+  index: TaxIndex;
+  status: TaxCacheStatus;
+}> {
+  const now = Date.now();
+
+  if (
+    cachedTaxIndex &&
+    cachedTaxIndex.expiresAt > now
+  ) {
+    console.info(
+      "[VacantWatch] Tax cache hit"
+    );
+
+    return {
+      index: cachedTaxIndex,
+      status: "hit",
+    };
+  }
+
+  if (taxIndexBuildPromise) {
+    console.info(
+      "[VacantWatch] Waiting for existing tax-index build"
+    );
+
+    return {
+      index:
+        await taxIndexBuildPromise,
+      status: "shared-build",
+    };
+  }
+
+  const staleIndex =
+    cachedTaxIndex;
+
+  taxIndexBuildPromise =
+    buildTaxIndex();
+
+  try {
+    const newIndex =
+      await taxIndexBuildPromise;
+
+    cachedTaxIndex =
+      newIndex;
+
+    return {
+      index: newIndex,
+      status: "miss",
+    };
+  } catch (error) {
+    /*
+     * If refreshing fails but an older index exists,
+     * continue serving that older index.
+     */
+    if (staleIndex) {
+      console.warn(
+        "[VacantWatch] Tax refresh failed; serving stale cache",
+        error
+      );
+
+      return {
+        index: staleIndex,
+        status: "stale",
+      };
+    }
+
+    throw error;
+  } finally {
+    taxIndexBuildPromise =
+      null;
+  }
 }
 
 function createPinWhereClause(
@@ -1139,9 +1338,6 @@ function sortTaxRecords(
 
 /**
  * Return one page of complete parcel records.
- *
- * limit and offset refer to parcels, not individual
- * tax rows.
  */
 export async function getProperties(
   options:
@@ -1165,54 +1361,12 @@ export async function getProperties(
   );
 
   const {
-    records: taxRecords,
-    truncated:
-      taxRowsTruncated,
-  } =
-    await fetchAllTaxRecords();
-
-  const completeTaxByPin =
-    aggregateTaxRecords(
-      taxRecords
-    );
-
-  const orderedTaxAggregates =
-    Array.from(
-      completeTaxByPin.values()
-    ).sort(
-      (first, second) => {
-        const firstOutstanding =
-          Math.max(
-            0,
-            first.billedCents -
-              first.paidCents
-          );
-
-        const secondOutstanding =
-          Math.max(
-            0,
-            second.billedCents -
-              second.paidCents
-          );
-
-        const amountDifference =
-          secondOutstanding -
-          firstOutstanding;
-
-        if (
-          amountDifference !== 0
-        ) {
-          return amountDifference;
-        }
-
-        return first.pin.localeCompare(
-          second.pin
-        );
-      }
-    );
+    index: taxIndex,
+    status: cacheStatus,
+  } = await getTaxIndex();
 
   const pageAggregates =
-    orderedTaxAggregates.slice(
+    taxIndex.orderedTaxAggregates.slice(
       offset,
       offset + limit
     );
@@ -1295,6 +1449,9 @@ export async function getProperties(
     offset +
     pageAggregates.length;
 
+  const currentTime =
+    Date.now();
+
   return {
     properties,
 
@@ -1307,7 +1464,9 @@ export async function getProperties(
       nextOffset,
 
       totalProperties:
-        orderedTaxAggregates.length,
+        taxIndex
+          .orderedTaxAggregates
+          .length,
 
       propertiesRequested:
         pageAggregates.length,
@@ -1317,12 +1476,46 @@ export async function getProperties(
 
       hasMoreProperties:
         nextOffset <
-        orderedTaxAggregates.length,
+        taxIndex
+          .orderedTaxAggregates
+          .length,
 
       taxRowsScanned:
-        taxRecords.length,
+        taxIndex.taxRowsScanned,
 
-      taxRowsTruncated,
+      taxRowsTruncated:
+        taxIndex.taxRowsTruncated,
+    },
+
+    cache: {
+      status:
+        cacheStatus,
+
+      generatedAt:
+        new Date(
+          taxIndex.generatedAt
+        ).toISOString(),
+
+      expiresAt:
+        new Date(
+          taxIndex.expiresAt
+        ).toISOString(),
+
+      ageSeconds:
+        Math.max(
+          0,
+          Math.floor(
+            (currentTime -
+              taxIndex.generatedAt) /
+              1000
+          )
+        ),
+
+      ttlSeconds:
+        Math.floor(
+          TAX_CACHE_TTL_MS /
+            1000
+        ),
     },
 
     source: {
@@ -1338,7 +1531,7 @@ export async function getProperties(
 
     debug: {
       totalUniquePins:
-        completeTaxByPin.size,
+        taxIndex.taxByPin.size,
 
       pagePins:
         pins.length,
@@ -1403,7 +1596,8 @@ export async function getPropertyById(
 
   const taxByPin =
     aggregateTaxRecords(
-      taxRecords
+      taxRecords,
+      true
     );
 
   const taxAggregate =
