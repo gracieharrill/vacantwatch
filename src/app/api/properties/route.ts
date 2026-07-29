@@ -1,45 +1,139 @@
-import { NextRequest, NextResponse } from "next/server";
+import {
+  NextRequest,
+  NextResponse,
+} from "next/server";
 
-import { getProperties } from "../../../lib/property/king-county";
+import {
+  getProperties,
+} from "../../../lib/property/king-county";
+
+import type {
+  PropertySignal,
+} from "../../../lib/property/types";
+
+export const runtime = "nodejs";
+
+const validSignals =
+  new Set<PropertySignal>([
+    "vacant",
+    "tax-delinquent",
+    "blighted",
+    "potential",
+  ]);
 
 function parseInteger(
   value: string | null,
   fallback: number
 ): number {
-  if (!value) {
+  if (value === null) {
     return fallback;
   }
 
-  const parsed = Number.parseInt(value, 10);
+  const result = Number(value);
 
-  return Number.isFinite(parsed) ? parsed : fallback;
+  if (
+    !Number.isFinite(result) ||
+    !Number.isInteger(result)
+  ) {
+    return fallback;
+  }
+
+  return result;
 }
 
-export async function GET(request: NextRequest) {
+function parseMoney(
+  value: string | null
+): number {
+  if (value === null) {
+    return 0;
+  }
+
+  const result = Number(value);
+
+  if (!Number.isFinite(result)) {
+    return 0;
+  }
+
+  return Math.max(result, 0);
+}
+
+function parseSignal(
+  value: string | null
+): PropertySignal | "all" {
+  if (!value || value === "all") {
+    return "all";
+  }
+
+  if (
+    validSignals.has(
+      value as PropertySignal
+    )
+  ) {
+    return value as PropertySignal;
+  }
+
+  return "all";
+}
+
+export async function GET(
+  request: NextRequest
+) {
   try {
+    const searchParams =
+      request.nextUrl
+        .searchParams;
+
     const limit = parseInteger(
-      request.nextUrl.searchParams.get("limit"),
-      1000
+      searchParams.get("limit"),
+      100
     );
 
     const offset = parseInteger(
-      request.nextUrl.searchParams.get("offset"),
+      searchParams.get("offset"),
       0
     );
 
-    const result = await getProperties({
-      limit,
-      offset,
-    });
+    const signal = parseSignal(
+      searchParams.get("signal")
+    );
 
-    return NextResponse.json(result);
+    const minOutstanding =
+      parseMoney(
+        searchParams.get(
+          "minOutstanding"
+        )
+      );
+
+    const query =
+      String(
+        searchParams.get("q") ??
+          ""
+      )
+        .trim()
+        .slice(0, 100);
+
+    const result =
+      await getProperties({
+        limit,
+        offset,
+        signal,
+        minOutstanding,
+        query,
+      });
+
+    return NextResponse.json(
+      result
+    );
   } catch (error) {
+    console.error(
+      "Property list API error:",
+      error
+    );
+
     const message =
       error instanceof Error
         ? error.message
-        : "Unknown property API error";
-
-    console.error("Properties API error:", error);
+        : "Unable to load properties";
 
     return NextResponse.json(
       {

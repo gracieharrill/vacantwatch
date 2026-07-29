@@ -18,11 +18,14 @@ const TAX_BATCH_SIZE = 5000;
 const MAX_TAX_ROWS = 200000;
 const ARCGIS_BATCH_SIZE = 50;
 
-/*
- * Reuse the complete aggregated tax index for one hour.
- */
 const TAX_CACHE_TTL_MS =
   60 * 60 * 1000;
+
+const ASSESSOR_FILTER_CACHE_TTL_MS =
+  15 * 60 * 1000;
+
+const ASSESSOR_FILTER_PAGE_SIZE = 2000;
+const MAX_ASSESSOR_FILTER_RESULTS = 100000;
 
 const TAX_SELECT_FIELDS = [
   "account_number",
@@ -56,6 +59,9 @@ const ASSESSOR_FIELDS = [
 export type PropertyQueryOptions = {
   limit?: number;
   offset?: number;
+  signal?: PropertySignal | "all";
+  minOutstanding?: number;
+  query?: string;
 };
 
 type TaxFetchOptions = {
@@ -99,6 +105,19 @@ type TaxCacheStatus =
   | "shared-build"
   | "stale";
 
+type AssessorCacheStatus =
+  | "not-needed"
+  | "hit"
+  | "miss"
+  | "shared-build"
+  | "stale";
+
+type AssessorPinCacheEntry = {
+  pins: Set<string>;
+  generatedAt: number;
+  expiresAt: number;
+};
+
 type ParcelGeometryAttributes = {
   PIN?: string;
   MAJOR?: string;
@@ -127,6 +146,10 @@ type ParcelAssessorAttributes = {
   LON?: number | string;
 };
 
+type AssessorPinAttributes = {
+  PIN?: string;
+};
+
 type ArcGisFeature<
   TAttributes,
   TGeometry = unknown,
@@ -140,11 +163,10 @@ type ArcGisResponse<
   TGeometry = unknown,
 > = {
   features?: Array<
-    ArcGisFeature<
-      TAttributes,
-      TGeometry
-    >
+    ArcGisFeature<TAttributes, TGeometry>
   >;
+
+  exceededTransferLimit?: boolean;
 
   error?: {
     code?: number;
@@ -153,28 +175,25 @@ type ArcGisResponse<
   };
 };
 
-/*
- * These module-level values remain available while
- * the current Node.js server process is running.
- */
-let cachedTaxIndex:
-  | TaxIndex
-  | null = null;
+let cachedTaxIndex: TaxIndex | null =
+  null;
 
 let taxIndexBuildPromise:
   | Promise<TaxIndex>
   | null = null;
 
-/**
- * Convert a parcel number or tax account number
- * into a 10-digit King County parcel PIN.
- *
- * Tax account:
- * 000740015306
- *
- * Parcel PIN:
- * 0007400153
- */
+const assessorPinCache =
+  new Map<
+    string,
+    AssessorPinCacheEntry
+  >();
+
+const assessorPinBuildPromises =
+  new Map<
+    string,
+    Promise<AssessorPinCacheEntry>
+  >();
+
 export function normalizePin(
   value: unknown
 ): string | null {
@@ -248,10 +267,6 @@ function yearOrUndefined(
   return result;
 }
 
-/*
- * King County delinquent-tax money fields
- * are represented as integer cents.
- */
 function parseCents(
   value: unknown
 ): number {
@@ -294,6 +309,15 @@ function chunkArray<T>(
   return chunks;
 }
 
+function escapeSqlLiteral(
+  value: string
+): string {
+  return value.replaceAll(
+    "'",
+    "''"
+  );
+}
+
 async function fetchJson<T>(
   url: string,
   description: string
@@ -327,10 +351,6 @@ async function fetchJson<T>(
   return (await response.json()) as T;
 }
 
-/*
- * ArcGIS queries use POST so the PIN filters
- * do not create excessively long URLs.
- */
 async function fetchArcGisJson<T>(
   url: string,
   parameters: URLSearchParams,
@@ -342,6 +362,7 @@ async function fetchArcGisJson<T>(
     headers: {
       "Content-Type":
         "application/x-www-form-urlencoded;charset=UTF-8",
+
       Accept: "application/json",
     },
 
@@ -396,9 +417,11 @@ function assertNoArcGisError(
   throw new Error(
     [
       `${description} returned an ArcGIS error`,
+
       response.error.code
         ? `Code ${response.error.code}`
         : "",
+
       response.error.message,
       details,
     ]
@@ -481,12 +504,6 @@ async function fetchAllTaxRecords(): Promise<{
   };
 }
 
-/*
- * includeRecordDetails is false for the large list cache,
- * reducing memory use.
- *
- * It is true for one-property detail requests.
- */
 function aggregateTaxRecords(
   records: TaxRow[],
   includeRecordDetails: boolean
@@ -625,14 +642,12 @@ function sortTaxAggregates(
             second.paidCents
         );
 
-      const amountDifference =
+      const difference =
         secondOutstanding -
         firstOutstanding;
 
-      if (
-        amountDifference !== 0
-      ) {
-        return amountDifference;
+      if (difference !== 0) {
+        return difference;
       }
 
       return first.pin.localeCompare(
@@ -699,10 +714,6 @@ async function getTaxIndex(): Promise<{
     cachedTaxIndex &&
     cachedTaxIndex.expiresAt > now
   ) {
-    console.info(
-      "[VacantWatch] Tax cache hit"
-    );
-
     return {
       index: cachedTaxIndex,
       status: "hit",
@@ -710,13 +721,10 @@ async function getTaxIndex(): Promise<{
   }
 
   if (taxIndexBuildPromise) {
-    console.info(
-      "[VacantWatch] Waiting for existing tax-index build"
-    );
-
     return {
       index:
         await taxIndexBuildPromise,
+
       status: "shared-build",
     };
   }
@@ -739,13 +747,9 @@ async function getTaxIndex(): Promise<{
       status: "miss",
     };
   } catch (error) {
-    /*
-     * If refreshing fails but an older index exists,
-     * continue serving that older index.
-     */
     if (staleIndex) {
       console.warn(
-        "[VacantWatch] Tax refresh failed; serving stale cache",
+        "[VacantWatch] Tax refresh failed; using stale tax index",
         error
       );
 
@@ -759,6 +763,297 @@ async function getTaxIndex(): Promise<{
   } finally {
     taxIndexBuildPromise =
       null;
+  }
+}
+
+function buildAssessorFilterWhere({
+  signal,
+  query,
+}: {
+  signal: PropertySignal | "all";
+  query: string;
+}): string | null {
+  const conditions: string[] =
+    [];
+
+  if (signal === "vacant") {
+    conditions.push(
+      "(UPPER(PRES_USE) LIKE '%VACANT%' OR BLDG_GRSS_SQFT = 0)"
+    );
+  }
+
+  const trimmedQuery =
+    query.trim();
+
+  const numericQuery =
+    trimmedQuery.replace(
+      /\D/g,
+      ""
+    );
+
+  const queryIsNumeric =
+    trimmedQuery.length > 0 &&
+    /^[\d\s-]+$/.test(
+      trimmedQuery
+    );
+
+  if (
+    trimmedQuery &&
+    !queryIsNumeric
+  ) {
+    const escapedQuery =
+      escapeSqlLiteral(
+        trimmedQuery.toUpperCase()
+      );
+
+    conditions.push(
+      [
+        "(",
+        `UPPER(ADDRESS) LIKE '%${escapedQuery}%'`,
+        " OR ",
+        `UPPER(PROP_NAME) LIKE '%${escapedQuery}%'`,
+        ")",
+      ].join("")
+    );
+  }
+
+  if (
+    queryIsNumeric &&
+    numericQuery.length >= 10
+  ) {
+    conditions.push(
+      `PIN = '${numericQuery.slice(
+        0,
+        10
+      )}'`
+    );
+  }
+
+  if (
+    conditions.length === 0
+  ) {
+    return null;
+  }
+
+  return conditions.join(
+    " AND "
+  );
+}
+
+async function fetchAssessorPinsByWhere(
+  where: string
+): Promise<Set<string>> {
+  const pins =
+    new Set<string>();
+
+  let resultOffset = 0;
+
+  while (
+    resultOffset <
+    MAX_ASSESSOR_FILTER_RESULTS
+  ) {
+    const parameters =
+      new URLSearchParams({
+        where,
+        outFields: "PIN",
+        returnGeometry: "false",
+
+        resultOffset:
+          String(resultOffset),
+
+        resultRecordCount:
+          String(
+            ASSESSOR_FILTER_PAGE_SIZE
+          ),
+
+        orderByFields:
+          "PIN ASC",
+
+        f: "json",
+      });
+
+    const response =
+      await fetchArcGisJson<
+        ArcGisResponse<
+          AssessorPinAttributes
+        >
+      >(
+        PARCEL_ATTRIBUTES_URL,
+        parameters,
+        "King County assessor-filter request"
+      );
+
+    assertNoArcGisError(
+      response,
+      "King County assessor-filter request"
+    );
+
+    const features =
+      response.features ?? [];
+
+    for (
+      const feature of
+      features
+    ) {
+      const pin = normalizePin(
+        feature.attributes?.PIN
+      );
+
+      if (pin) {
+        pins.add(pin);
+      }
+    }
+
+    if (features.length === 0) {
+      break;
+    }
+
+    resultOffset +=
+      features.length;
+
+    const hasMore =
+      response
+        .exceededTransferLimit ===
+        true ||
+      features.length ===
+        ASSESSOR_FILTER_PAGE_SIZE;
+
+    if (!hasMore) {
+      break;
+    }
+  }
+
+  if (
+    resultOffset >=
+    MAX_ASSESSOR_FILTER_RESULTS
+  ) {
+    throw new Error(
+      "The assessor filter returned too many records. Use a more specific search."
+    );
+  }
+
+  return pins;
+}
+
+async function buildAssessorPinCacheEntry(
+  where: string
+): Promise<AssessorPinCacheEntry> {
+  const pins =
+    await fetchAssessorPinsByWhere(
+      where
+    );
+
+  const generatedAt =
+    Date.now();
+
+  return {
+    pins,
+    generatedAt,
+
+    expiresAt:
+      generatedAt +
+      ASSESSOR_FILTER_CACHE_TTL_MS,
+  };
+}
+
+async function getAssessorPinSet(
+  where: string
+): Promise<{
+  pins: Set<string>;
+  status: AssessorCacheStatus;
+  generatedAt: number;
+  expiresAt: number;
+}> {
+  const now = Date.now();
+
+  const existing =
+    assessorPinCache.get(where);
+
+  if (
+    existing &&
+    existing.expiresAt > now
+  ) {
+    return {
+      pins: existing.pins,
+      status: "hit",
+      generatedAt:
+        existing.generatedAt,
+      expiresAt:
+        existing.expiresAt,
+    };
+  }
+
+  const existingBuild =
+    assessorPinBuildPromises.get(
+      where
+    );
+
+  if (existingBuild) {
+    const entry =
+      await existingBuild;
+
+    return {
+      pins: entry.pins,
+      status: "shared-build",
+      generatedAt:
+        entry.generatedAt,
+      expiresAt:
+        entry.expiresAt,
+    };
+  }
+
+  const staleEntry =
+    existing;
+
+  const buildPromise =
+    buildAssessorPinCacheEntry(
+      where
+    );
+
+  assessorPinBuildPromises.set(
+    where,
+    buildPromise
+  );
+
+  try {
+    const entry =
+      await buildPromise;
+
+    assessorPinCache.set(
+      where,
+      entry
+    );
+
+    return {
+      pins: entry.pins,
+      status: "miss",
+      generatedAt:
+        entry.generatedAt,
+      expiresAt:
+        entry.expiresAt,
+    };
+  } catch (error) {
+    if (staleEntry) {
+      console.warn(
+        "[VacantWatch] Assessor filter refresh failed; using stale filter",
+        error
+      );
+
+      return {
+        pins: staleEntry.pins,
+        status: "stale",
+        generatedAt:
+          staleEntry.generatedAt,
+        expiresAt:
+          staleEntry.expiresAt,
+      };
+    }
+
+    throw error;
+  } finally {
+    assessorPinBuildPromises.delete(
+      where
+    );
   }
 }
 
@@ -845,6 +1140,7 @@ function chooseBetterAssessorRecord(
   existing:
     | ParcelAssessorAttributes
     | undefined,
+
   candidate:
     ParcelAssessorAttributes
 ): ParcelAssessorAttributes {
@@ -973,10 +1269,12 @@ async function fetchParcelAttributes(
 
       attributesByPin.set(
         pin,
+
         chooseBetterAssessorRecord(
           attributesByPin.get(
             pin
           ),
+
           attributes
         )
       );
@@ -1237,6 +1535,7 @@ function featureToProperty(
   const outstandingCents =
     Math.max(
       0,
+
       taxAggregate.billedCents -
         taxAggregate.paidCents
     );
@@ -1317,9 +1616,7 @@ function sortTaxRecords(
           first.billYear ?? 0
         );
 
-      if (
-        yearDifference !== 0
-      ) {
+      if (yearDifference !== 0) {
         return yearDifference;
       }
 
@@ -1336,9 +1633,6 @@ function sortTaxRecords(
   );
 }
 
-/**
- * Return one page of complete parcel records.
- */
 export async function getProperties(
   options:
     PropertyQueryOptions = {}
@@ -1360,13 +1654,133 @@ export async function getProperties(
     0
   );
 
+  const signal =
+    options.signal ?? "all";
+
+  const query =
+    String(
+      options.query ?? ""
+    )
+      .trim()
+      .slice(0, 100);
+
+  const minOutstanding =
+    Number.isFinite(
+      options.minOutstanding
+    )
+      ? Math.max(
+          options.minOutstanding ??
+            0,
+          0
+        )
+      : 0;
+
   const {
     index: taxIndex,
-    status: cacheStatus,
+    status: taxCacheStatus,
   } = await getTaxIndex();
 
+  let candidates =
+    taxIndex
+      .orderedTaxAggregates;
+
+  const minimumCents =
+    Math.round(
+      minOutstanding * 100
+    );
+
+  if (minimumCents > 0) {
+    candidates =
+      candidates.filter(
+        (aggregate) => {
+          const outstanding =
+            Math.max(
+              0,
+
+              aggregate.billedCents -
+                aggregate.paidCents
+            );
+
+          return (
+            outstanding >=
+            minimumCents
+          );
+        }
+      );
+  }
+
+  const numericQuery =
+    query.replace(/\D/g, "");
+
+  const queryIsNumeric =
+    query.length > 0 &&
+    /^[\d\s-]+$/.test(query);
+
+  if (
+    queryIsNumeric &&
+    numericQuery.length > 0
+  ) {
+    candidates =
+      candidates.filter(
+        (aggregate) =>
+          aggregate.pin.includes(
+            numericQuery
+          )
+      );
+  }
+
+  let assessorCacheStatus:
+    AssessorCacheStatus =
+    "not-needed";
+
+  let assessorCacheGeneratedAt:
+    number | null = null;
+
+  let assessorCacheExpiresAt:
+    number | null = null;
+
+  if (
+    signal === "blighted" ||
+    signal === "potential"
+  ) {
+    candidates = [];
+  } else {
+    const assessorWhere =
+      buildAssessorFilterWhere({
+        signal,
+        query,
+      });
+
+    if (assessorWhere) {
+      const assessorResult =
+        await getAssessorPinSet(
+          assessorWhere
+        );
+
+      assessorCacheStatus =
+        assessorResult.status;
+
+      assessorCacheGeneratedAt =
+        assessorResult.generatedAt;
+
+      assessorCacheExpiresAt =
+        assessorResult.expiresAt;
+
+      candidates =
+        candidates.filter(
+          (aggregate) =>
+            assessorResult.pins.has(
+              aggregate.pin
+            )
+        );
+    }
+  }
+
+  const totalProperties =
+    candidates.length;
+
   const pageAggregates =
-    taxIndex.orderedTaxAggregates.slice(
+    candidates.slice(
       offset,
       offset + limit
     );
@@ -1458,12 +1872,20 @@ export async function getProperties(
     count:
       properties.length,
 
+    filters: {
+      signal,
+      query,
+      minOutstanding,
+    },
+
     pagination: {
       limit,
       offset,
       nextOffset,
 
-      totalProperties:
+      totalProperties,
+
+      unfilteredTotalProperties:
         taxIndex
           .orderedTaxAggregates
           .length,
@@ -1476,9 +1898,7 @@ export async function getProperties(
 
       hasMoreProperties:
         nextOffset <
-        taxIndex
-          .orderedTaxAggregates
-          .length,
+        totalProperties,
 
       taxRowsScanned:
         taxIndex.taxRowsScanned,
@@ -1488,34 +1908,62 @@ export async function getProperties(
     },
 
     cache: {
-      status:
-        cacheStatus,
+      tax: {
+        status:
+          taxCacheStatus,
 
-      generatedAt:
-        new Date(
-          taxIndex.generatedAt
-        ).toISOString(),
+        generatedAt:
+          new Date(
+            taxIndex.generatedAt
+          ).toISOString(),
 
-      expiresAt:
-        new Date(
-          taxIndex.expiresAt
-        ).toISOString(),
+        expiresAt:
+          new Date(
+            taxIndex.expiresAt
+          ).toISOString(),
 
-      ageSeconds:
-        Math.max(
-          0,
+        ageSeconds:
+          Math.max(
+            0,
+
+            Math.floor(
+              (currentTime -
+                taxIndex.generatedAt) /
+                1000
+            )
+          ),
+
+        ttlSeconds:
           Math.floor(
-            (currentTime -
-              taxIndex.generatedAt) /
+            TAX_CACHE_TTL_MS /
               1000
-          )
-        ),
+          ),
+      },
 
-      ttlSeconds:
-        Math.floor(
-          TAX_CACHE_TTL_MS /
-            1000
-        ),
+      assessor: {
+        status:
+          assessorCacheStatus,
+
+        generatedAt:
+          assessorCacheGeneratedAt
+            ? new Date(
+                assessorCacheGeneratedAt
+              ).toISOString()
+            : null,
+
+        expiresAt:
+          assessorCacheExpiresAt
+            ? new Date(
+                assessorCacheExpiresAt
+              ).toISOString()
+            : null,
+
+        ttlSeconds:
+          Math.floor(
+            ASSESSOR_FILTER_CACHE_TTL_MS /
+              1000
+          ),
+      },
     },
 
     source: {
@@ -1532,6 +1980,9 @@ export async function getProperties(
     debug: {
       totalUniquePins:
         taxIndex.taxByPin.size,
+
+      filteredPins:
+        totalProperties,
 
       pagePins:
         pins.length,
@@ -1572,9 +2023,6 @@ export async function getProperties(
   };
 }
 
-/**
- * Return a complete detail record for one parcel.
- */
 export async function getPropertyById(
   value: string
 ): Promise<
