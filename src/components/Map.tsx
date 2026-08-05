@@ -16,16 +16,25 @@ type LeafletContainer = HTMLDivElement & {
   _leaflet_id?: number;
 };
 
-const statusColors: Record<Property["status"], string> = {
+const statusColors: Record<
+  Property["status"],
+  string
+> = {
+  parcel: "#64748b",
   vacant: "#dc2626",
-  "tax-delinquent": "#ea580c",
+  "tax-delinquent":
+    "#ea580c",
   blighted: "#ca8a04",
   potential: "#2563eb",
 };
-
-const statusLabels: Record<Property["status"], string> = {
+const statusLabels: Record<
+  Property["status"],
+  string
+> = {
+  parcel: "Parcel",
   vacant: "Vacant",
-  "tax-delinquent": "Tax Delinquent",
+  "tax-delinquent":
+    "Tax Delinquent",
   blighted: "Blighted",
   potential: "Potential",
 };

@@ -266,12 +266,17 @@ function buildWhereClause(
    * Spokane currently supports ordinary parcel
    * browsing and the generic "potential" signal.
    */
-  if (
-    signal !== "all" &&
-    signal !== "potential"
-  ) {
-    return "1=0";
-  }
+  /*
+ * Spokane currently supports ordinary neutral
+ * parcel browsing. It does not yet assign vacancy,
+ * delinquency, blight, or potential-risk signals.
+ */
+if (
+  signal !== "all" &&
+  signal !== "parcel"
+) {
+  return "1=0";
+}
 
   const conditions = [
     "PID_NUM IS NOT NULL",
@@ -609,7 +614,7 @@ function featureToProperty(
 
   const signals:
     PropertySignal[] = [
-    "potential",
+    "parcel",
   ];
 
   const digits =
@@ -630,8 +635,8 @@ function featureToProperty(
     lat: center.lat,
     lng: center.lng,
 
-    status: "potential",
-    primaryStatus: "potential",
+    status: "parcel",
+    primaryStatus: "parcel",
     signals,
 
     major:

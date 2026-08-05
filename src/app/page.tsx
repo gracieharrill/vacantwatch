@@ -147,6 +147,8 @@ const signalLabels: Record<
   PropertySignal,
   string
 > = {
+  parcel: "Parcel",
+
   vacant: "Vacant",
 
   "tax-delinquent":
@@ -161,6 +163,9 @@ const signalBadgeClasses: Record<
   PropertySignal,
   string
 > = {
+  parcel:
+    "border-slate-200 bg-slate-50 text-slate-600",
+
   vacant:
     "border-red-200 bg-red-50 text-red-700",
 
@@ -173,7 +178,6 @@ const signalBadgeClasses: Record<
   potential:
     "border-blue-200 bg-blue-50 text-blue-700",
 };
-
 const currencyFormatter =
   new Intl.NumberFormat(
     "en-US",

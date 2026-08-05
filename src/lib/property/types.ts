@@ -1,10 +1,12 @@
 export type PropertySignal =
+  | "parcel"
   | "vacant"
   | "tax-delinquent"
   | "blighted"
   | "potential";
 
-export type PropertyStatus = PropertySignal;
+export type PropertyStatus =
+  PropertySignal;
 
 export type Property = {
   id: string;
@@ -17,11 +19,15 @@ export type Property = {
    */
   status: PropertyStatus;
 
-  primaryStatus: PropertySignal;
-  signals: PropertySignal[];
+  primaryStatus:
+    PropertySignal;
+
+  signals:
+    PropertySignal[];
 
   major?: string;
   minor?: string;
+
   propertyName?: string;
   presentUse?: string;
   landUseCode?: number;
@@ -57,6 +63,8 @@ export type TaxRecordDetail = {
   outstandingAmount: number;
 };
 
-export type PropertyDetail = Property & {
-  taxRecords: TaxRecordDetail[];
-};
+export type PropertyDetail =
+  Property & {
+    taxRecords:
+      TaxRecordDetail[];
+  };
