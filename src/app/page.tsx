@@ -58,6 +58,15 @@ type ProviderSummary = {
 
   capabilities:
     ProviderCapabilities;
+
+  map: {
+    center: {
+      lat: number;
+      lng: number;
+    };
+
+    defaultZoom: number;
+  };
 };
 
 type ProvidersResponse = {
@@ -99,11 +108,6 @@ type PropertyPageOptions = {
   abortSignal?: AbortSignal;
 };
 
-type ProviderMapView = {
-  center: [number, number];
-  zoom: number;
-};
-
 const fallbackProvider:
   ProviderSummary = {
     id: "king-county",
@@ -132,6 +136,15 @@ const fallbackProvider:
       taxDelinquency: true,
       vacancyCandidates: true,
       mapBounds: false,
+    },
+
+    map: {
+      center: {
+        lat: 47.6062,
+        lng: -122.3321,
+      },
+
+      defaultZoom: 10,
     },
   };
 
@@ -191,31 +204,6 @@ const numberFormatter =
   new Intl.NumberFormat(
     "en-US"
   );
-
-function getProviderMapView(
-  providerId: string
-): ProviderMapView {
-  if (
-    providerId ===
-    "spokane-county"
-  ) {
-    return {
-      center: [
-        47.6588,
-        -117.426,
-      ],
-      zoom: 14,
-    };
-  }
-
-  return {
-    center: [
-      47.6062,
-      -122.3321,
-    ],
-    zoom: 10,
-  };
-}
 
 function getPropertySignals(
   property: Property
@@ -549,17 +537,6 @@ export default function Home() {
   const capabilities =
     selectedProvider
       .capabilities;
-
-  const providerMapView =
-    useMemo(
-      () =>
-        getProviderMapView(
-          selectedProviderId
-        ),
-      [
-        selectedProviderId,
-      ]
-    );
 
   useEffect(() => {
     const controller =
@@ -1601,11 +1578,16 @@ export default function Home() {
           boundsSearchEnabled={
             capabilities.mapBounds
           }
-          initialCenter={
-            providerMapView.center
-          }
+          initialCenter={[
+            selectedProvider
+              .map.center.lat,
+
+            selectedProvider
+              .map.center.lng,
+          ]}
           initialZoom={
-            providerMapView.zoom
+            selectedProvider
+              .map.defaultZoom
           }
           viewKey={
             selectedProviderId

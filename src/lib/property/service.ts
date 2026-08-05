@@ -21,11 +21,6 @@ import {
 export const DEFAULT_PROVIDER_ID =
   "king-county";
 
-/*
- * Explicit Map type parameters prevent TypeScript
- * from assuming every provider must have the exact
- * same source fields as King County.
- */
 const providers:
   ReadonlyMap<
     string,
@@ -112,6 +107,9 @@ export function getPropertyProviderSummary(
 
     capabilities:
       provider.capabilities,
+
+    map:
+      provider.map,
   };
 }
 
@@ -132,6 +130,9 @@ export function getAvailableProviders() {
 
     capabilities:
       provider.capabilities,
+
+    map:
+      provider.map,
   }));
 }
 
@@ -212,6 +213,9 @@ export async function getProperties(
 
       capabilities:
         provider.capabilities,
+
+      map:
+        provider.map,
     },
   };
 }

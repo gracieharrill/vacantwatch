@@ -51,12 +51,22 @@ export type PropertyProviderCapabilities = {
   mapBounds: boolean;
 };
 
+export type PropertyProviderMapConfig = {
+  center: {
+    lat: number;
+    lng: number;
+  };
+
+  defaultZoom: number;
+};
+
 export type PropertyProvider = {
   id: string;
   displayName: string;
   jurisdiction: PropertyJurisdiction;
   source: PropertySourceInfo;
   capabilities: PropertyProviderCapabilities;
+  map: PropertyProviderMapConfig;
 
   normalizeParcelId(
     value: unknown

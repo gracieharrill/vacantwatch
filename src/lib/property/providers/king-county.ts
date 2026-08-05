@@ -46,6 +46,15 @@ export const kingCountyProvider = {
     mapBounds: false,
   },
 
+  map: {
+    center: {
+      lat: 47.6062,
+      lng: -122.3321,
+    },
+
+    defaultZoom: 10,
+  },
+
   normalizeParcelId:
     normalizePin,
 

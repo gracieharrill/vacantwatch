@@ -939,6 +939,15 @@ export const spokaneCountyProvider = {
     mapBounds: true,
   },
 
+  map: {
+    center: {
+      lat: 47.6588,
+      lng: -117.426,
+    },
+
+    defaultZoom: 14,
+  },
+
   normalizeParcelId:
     normalizeSpokaneParcelId,
 
