@@ -1,19 +1,22 @@
-VacantWatch API error handling
+VacantWatch King County visible-map bounds
 
-Replace these files:
+Replace these project files:
 
+src/lib/property/king-county.ts
+src/lib/property/providers/king-county.ts
+src/lib/property/provider.ts
 src/app/api/properties/route.ts
-src/lib/property/service.ts
 scripts/smoke-test.mjs
 
-Changes:
+What changes:
 
-- Unsupported provider capabilities now return HTTP 400.
-- Invalid signal, numeric, money, query-length, and map-bound inputs return HTTP 400.
-- Genuine provider or external-data failures remain HTTP 500.
-- Expected client mistakes use concise warning logs instead of full error stacks.
-- The smoke-test runner now starts Next.js directly through Node, avoiding Windows spawn EINVAL.
-- The smoke tests now require exact HTTP 400 responses for unsupported features.
+- King County now reports mapBounds: true.
+- King County starts at zoom 14.
+- The ArcGIS parcel layer is queried with the visible WGS84 envelope.
+- Visible parcel PINs are intersected with the tax/vacancy candidates before pagination.
+- Bound results are cached for five minutes.
+- Areas containing more than 20,000 parcels return HTTP 400 with a Zoom in message.
+- Smoke tests cover a known Beacon Avenue parcel and wide-map rejection.
 
 Commands:
 
@@ -23,10 +26,10 @@ npm run test:smoke
 
 Expected final line:
 
-All 10 smoke tests passed.
+All 11 smoke tests passed.
 
 Commit and push:
 
 git add .
-git commit -m "Improve API error handling"
-git push --set-upstream origin feature/api-error-handling
+git commit -m "Add King County map bounds search"
+git push --set-upstream origin feature/king-map-bounds

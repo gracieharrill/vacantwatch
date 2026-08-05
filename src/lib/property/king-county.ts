@@ -5,6 +5,12 @@ import type {
   TaxRecordDetail,
 } from "./types";
 
+import {
+  InvalidPropertyProviderQueryError,
+  type PropertyMapBounds,
+  type PropertyQueryOptions,
+} from "./provider";
+
 const DELINQUENT_TAX_URL =
   "https://data.kingcounty.gov/resource/dsv3-ct3e.json";
 
@@ -17,6 +23,14 @@ const PARCEL_ATTRIBUTES_URL =
 const TAX_BATCH_SIZE = 5000;
 const MAX_TAX_ROWS = 200000;
 const ARCGIS_BATCH_SIZE = 50;
+
+const MAP_BOUNDS_PAGE_SIZE = 1000;
+const MAX_MAP_BOUNDS_PARCELS = 20000;
+
+const MAP_BOUNDS_CACHE_TTL_MS =
+  5 * 60 * 1000;
+
+const MAX_MAP_BOUNDS_CACHE_ENTRIES = 40;
 
 const TAX_CACHE_TTL_MS =
   60 * 60 * 1000;
@@ -56,13 +70,6 @@ const ASSESSOR_FIELDS = [
   "LON",
 ].join(",");
 
-export type PropertyQueryOptions = {
-  limit?: number;
-  offset?: number;
-  signal?: PropertySignal | "all";
-  minOutstanding?: number;
-  query?: string;
-};
 
 type TaxFetchOptions = {
   limit: number;
@@ -111,6 +118,20 @@ type AssessorCacheStatus =
   | "miss"
   | "shared-build"
   | "stale";
+
+type MapBoundsCacheStatus =
+  | "not-needed"
+  | "hit"
+  | "miss"
+  | "shared-build"
+  | "stale";
+
+type MapBoundsPinCacheEntry = {
+  pins: Set<string>;
+  parcelCount: number;
+  generatedAt: number;
+  expiresAt: number;
+};
 
 type AssessorPinCacheEntry = {
   pins: Set<string>;
@@ -162,6 +183,8 @@ type ArcGisResponse<
   TAttributes,
   TGeometry = unknown,
 > = {
+  count?: number;
+
   features?: Array<
     ArcGisFeature<TAttributes, TGeometry>
   >;
@@ -192,6 +215,18 @@ const assessorPinBuildPromises =
   new Map<
     string,
     Promise<AssessorPinCacheEntry>
+  >();
+
+const mapBoundsPinCache =
+  new Map<
+    string,
+    MapBoundsPinCacheEntry
+  >();
+
+const mapBoundsPinBuildPromises =
+  new Map<
+    string,
+    Promise<MapBoundsPinCacheEntry>
   >();
 
 export function normalizePin(
@@ -318,6 +353,90 @@ function escapeSqlLiteral(
   );
 }
 
+function getMapBoundsCacheKey(
+  bounds: PropertyMapBounds
+): string {
+  return [
+    bounds.west,
+    bounds.south,
+    bounds.east,
+    bounds.north,
+  ]
+    .map((value) =>
+      value.toFixed(6)
+    )
+    .join(",");
+}
+
+function addMapBoundsParameters(
+  parameters: URLSearchParams,
+  bounds: PropertyMapBounds
+): void {
+  parameters.set(
+    "geometry",
+    [
+      bounds.west,
+      bounds.south,
+      bounds.east,
+      bounds.north,
+    ].join(",")
+  );
+
+  parameters.set(
+    "geometryType",
+    "esriGeometryEnvelope"
+  );
+
+  parameters.set(
+    "inSR",
+    "4326"
+  );
+
+  parameters.set(
+    "spatialRel",
+    "esriSpatialRelIntersects"
+  );
+}
+
+function pruneMapBoundsCache(): void {
+  const currentTime = Date.now();
+
+  for (
+    const [
+      key,
+      entry,
+    ] of mapBoundsPinCache
+  ) {
+    if (
+      entry.expiresAt <=
+      currentTime
+    ) {
+      mapBoundsPinCache.delete(
+        key
+      );
+    }
+  }
+
+  while (
+    mapBoundsPinCache.size >
+    MAX_MAP_BOUNDS_CACHE_ENTRIES
+  ) {
+    const oldestKey =
+      mapBoundsPinCache
+        .keys()
+        .next()
+        .value;
+
+    if (!oldestKey) {
+      break;
+    }
+
+    mapBoundsPinCache.delete(
+      oldestKey
+    );
+  }
+}
+
 async function fetchJson<T>(
   url: string,
   description: string
@@ -428,6 +547,314 @@ function assertNoArcGisError(
       .filter(Boolean)
       .join(": ")
   );
+}
+
+async function fetchMapBoundsParcelCount(
+  bounds: PropertyMapBounds
+): Promise<number> {
+  const parameters =
+    new URLSearchParams({
+      where: "1=1",
+      returnCountOnly: "true",
+      f: "json",
+    });
+
+  addMapBoundsParameters(
+    parameters,
+    bounds
+  );
+
+  const response =
+    await fetchArcGisJson<
+      ArcGisResponse<
+        ParcelGeometryAttributes
+      >
+    >(
+      PARCEL_GEOMETRY_URL,
+      parameters,
+      "King County map-bounds count request"
+    );
+
+  assertNoArcGisError(
+    response,
+    "King County map-bounds count request"
+  );
+
+  const count =
+    Number(response.count ?? 0);
+
+  if (
+    !Number.isFinite(count) ||
+    count < 0
+  ) {
+    throw new Error(
+      "King County map-bounds count request returned an invalid count."
+    );
+  }
+
+  return Math.floor(count);
+}
+
+async function buildMapBoundsPinCacheEntry(
+  bounds: PropertyMapBounds
+): Promise<MapBoundsPinCacheEntry> {
+  const parcelCount =
+    await fetchMapBoundsParcelCount(
+      bounds
+    );
+
+  if (
+    parcelCount >
+    MAX_MAP_BOUNDS_PARCELS
+  ) {
+    throw new InvalidPropertyProviderQueryError(
+      [
+        "The visible King County map area contains",
+        parcelCount.toLocaleString(
+          "en-US"
+        ),
+        "parcels.",
+        "Zoom in until fewer than",
+        MAX_MAP_BOUNDS_PARCELS.toLocaleString(
+          "en-US"
+        ),
+        "parcels are visible.",
+      ].join(" ")
+    );
+  }
+
+  const pins =
+    new Set<string>();
+
+  let resultOffset = 0;
+
+  while (
+    resultOffset <
+    parcelCount
+  ) {
+    const parameters =
+      new URLSearchParams({
+        where: "1=1",
+        outFields: "PIN",
+        returnGeometry: "false",
+        orderByFields:
+          "OBJECTID ASC",
+
+        resultOffset:
+          String(resultOffset),
+
+        resultRecordCount:
+          String(
+            MAP_BOUNDS_PAGE_SIZE
+          ),
+
+        f: "json",
+      });
+
+    addMapBoundsParameters(
+      parameters,
+      bounds
+    );
+
+    const response =
+      await fetchArcGisJson<
+        ArcGisResponse<
+          ParcelGeometryAttributes
+        >
+      >(
+        PARCEL_GEOMETRY_URL,
+        parameters,
+        "King County map-bounds parcel request"
+      );
+
+    assertNoArcGisError(
+      response,
+      "King County map-bounds parcel request"
+    );
+
+    const features =
+      response.features ?? [];
+
+    for (
+      const feature of
+      features
+    ) {
+      const pin = normalizePin(
+        feature.attributes?.PIN
+      );
+
+      if (pin) {
+        pins.add(pin);
+      }
+    }
+
+    if (
+      features.length === 0
+    ) {
+      break;
+    }
+
+    resultOffset +=
+      features.length;
+
+    const hasMore =
+      response
+        .exceededTransferLimit ===
+        true ||
+      features.length ===
+        MAP_BOUNDS_PAGE_SIZE;
+
+    if (!hasMore) {
+      break;
+    }
+  }
+
+  const generatedAt =
+    Date.now();
+
+  return {
+    pins,
+    parcelCount,
+    generatedAt,
+
+    expiresAt:
+      generatedAt +
+      MAP_BOUNDS_CACHE_TTL_MS,
+  };
+}
+
+async function getMapBoundsPinSet(
+  bounds: PropertyMapBounds
+): Promise<{
+  pins: Set<string>;
+  parcelCount: number;
+  status: MapBoundsCacheStatus;
+  generatedAt: number;
+  expiresAt: number;
+}> {
+  pruneMapBoundsCache();
+
+  const key =
+    getMapBoundsCacheKey(
+      bounds
+    );
+
+  const currentTime =
+    Date.now();
+
+  const existing =
+    mapBoundsPinCache.get(
+      key
+    );
+
+  if (
+    existing &&
+    existing.expiresAt >
+      currentTime
+  ) {
+    mapBoundsPinCache.delete(
+      key
+    );
+
+    mapBoundsPinCache.set(
+      key,
+      existing
+    );
+
+    return {
+      pins: existing.pins,
+      parcelCount:
+        existing.parcelCount,
+      status: "hit",
+      generatedAt:
+        existing.generatedAt,
+      expiresAt:
+        existing.expiresAt,
+    };
+  }
+
+  const existingBuild =
+    mapBoundsPinBuildPromises.get(
+      key
+    );
+
+  if (existingBuild) {
+    const entry =
+      await existingBuild;
+
+    return {
+      pins: entry.pins,
+      parcelCount:
+        entry.parcelCount,
+      status:
+        "shared-build",
+      generatedAt:
+        entry.generatedAt,
+      expiresAt:
+        entry.expiresAt,
+    };
+  }
+
+  const staleEntry =
+    existing;
+
+  const buildPromise =
+    buildMapBoundsPinCacheEntry(
+      bounds
+    );
+
+  mapBoundsPinBuildPromises.set(
+    key,
+    buildPromise
+  );
+
+  try {
+    const entry =
+      await buildPromise;
+
+    mapBoundsPinCache.set(
+      key,
+      entry
+    );
+
+    pruneMapBoundsCache();
+
+    return {
+      pins: entry.pins,
+      parcelCount:
+        entry.parcelCount,
+      status: "miss",
+      generatedAt:
+        entry.generatedAt,
+      expiresAt:
+        entry.expiresAt,
+    };
+  } catch (error) {
+    if (staleEntry) {
+      console.warn(
+        "[VacantWatch] King County map-bounds refresh failed; using stale parcel set",
+        error
+      );
+
+      return {
+        pins:
+          staleEntry.pins,
+        parcelCount:
+          staleEntry.parcelCount,
+        status: "stale",
+        generatedAt:
+          staleEntry.generatedAt,
+        expiresAt:
+          staleEntry.expiresAt,
+      };
+    }
+
+    throw error;
+  } finally {
+    mapBoundsPinBuildPromises.delete(
+      key
+    );
+  }
 }
 
 async function fetchTaxRecords({
@@ -1675,6 +2102,48 @@ export async function getProperties(
         )
       : 0;
 
+  const bounds =
+    options.bounds;
+
+  let mapBoundsPins:
+    | Set<string>
+    | null = null;
+
+  let mapBoundsParcelCount:
+    number | null = null;
+
+  let mapBoundsCacheStatus:
+    MapBoundsCacheStatus =
+    "not-needed";
+
+  let mapBoundsCacheGeneratedAt:
+    number | null = null;
+
+  let mapBoundsCacheExpiresAt:
+    number | null = null;
+
+  if (bounds) {
+    const mapBoundsResult =
+      await getMapBoundsPinSet(
+        bounds
+      );
+
+    mapBoundsPins =
+      mapBoundsResult.pins;
+
+    mapBoundsParcelCount =
+      mapBoundsResult.parcelCount;
+
+    mapBoundsCacheStatus =
+      mapBoundsResult.status;
+
+    mapBoundsCacheGeneratedAt =
+      mapBoundsResult.generatedAt;
+
+    mapBoundsCacheExpiresAt =
+      mapBoundsResult.expiresAt;
+  }
+
   const {
     index: taxIndex,
     status: taxCacheStatus,
@@ -1774,6 +2243,16 @@ export async function getProperties(
             )
         );
     }
+  }
+
+  if (mapBoundsPins) {
+    candidates =
+      candidates.filter(
+        (aggregate) =>
+          mapBoundsPins?.has(
+            aggregate.pin
+          ) ?? false
+      );
   }
 
   const totalProperties =
@@ -1876,6 +2355,7 @@ export async function getProperties(
       signal,
       query,
       minOutstanding,
+      bounds: bounds ?? null,
     },
 
     pagination: {
@@ -1908,6 +2388,34 @@ export async function getProperties(
     },
 
     cache: {
+      mapBounds: {
+        status:
+          mapBoundsCacheStatus,
+
+        parcelCount:
+          mapBoundsParcelCount,
+
+        generatedAt:
+          mapBoundsCacheGeneratedAt
+            ? new Date(
+                mapBoundsCacheGeneratedAt
+              ).toISOString()
+            : null,
+
+        expiresAt:
+          mapBoundsCacheExpiresAt
+            ? new Date(
+                mapBoundsCacheExpiresAt
+              ).toISOString()
+            : null,
+
+        ttlSeconds:
+          Math.floor(
+            MAP_BOUNDS_CACHE_TTL_MS /
+              1000
+          ),
+      },
+
       tax: {
         status:
           taxCacheStatus,
@@ -1980,6 +2488,13 @@ export async function getProperties(
     debug: {
       totalUniquePins:
         taxIndex.taxByPin.size,
+
+      visibleParcelPins:
+        mapBoundsPins?.size ??
+        null,
+
+      visibleParcelCount:
+        mapBoundsParcelCount,
 
       filteredPins:
         totalProperties,

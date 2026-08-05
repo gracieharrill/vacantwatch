@@ -11,8 +11,9 @@ import {
   UnsupportedPropertyCapabilityError,
 } from "../../../lib/property/service";
 
-import type {
-  PropertyMapBounds,
+import {
+  InvalidPropertyProviderQueryError,
+  type PropertyMapBounds,
 } from "../../../lib/property/provider";
 
 import type {
@@ -256,7 +257,9 @@ function isClientRequestError(
     error instanceof
       InvalidPropertyQueryError ||
     error instanceof
-      UnsupportedPropertyCapabilityError
+      UnsupportedPropertyCapabilityError ||
+    error instanceof
+      InvalidPropertyProviderQueryError
   );
 }
 

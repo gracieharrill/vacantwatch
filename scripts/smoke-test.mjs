@@ -212,6 +212,24 @@ const tests = [
 
       assert(
         providers.get(
+          "king-county"
+        ).capabilities
+          .mapBounds ===
+          true,
+        "King County should support map bounds"
+      );
+
+      assert(
+        providers.get(
+          "king-county"
+        ).map
+          .defaultZoom ===
+          14,
+        "King County should start at map zoom 14"
+      );
+
+      assert(
+        providers.get(
           "spokane-county"
         ).capabilities
           .mapBounds ===
@@ -429,12 +447,64 @@ const tests = [
 
   {
     name:
-      "King County map-bounds rejection",
+      "King County visible-map property",
 
     run: async () => {
       const data =
         await getJson(
-          "/api/properties?provider=king-county&west=-122.5&south=47.5&east=-122.2&north=47.8",
+          [
+            "/api/properties",
+            "?provider=king-county",
+            "&limit=10",
+            "&offset=0",
+            "&q=4410600145",
+            "&west=-122.315",
+            "&south=47.53",
+            "&east=-122.29",
+            "&north=47.56",
+          ].join("")
+        );
+
+      assert(
+        Array.isArray(
+          data.properties
+        ),
+        "King County map-bounds response does not contain properties"
+      );
+
+      assert(
+        data.properties.some(
+          (property) =>
+            property.id ===
+            "4410600145"
+        ),
+        "Known King County parcel was not returned inside the visible map bounds"
+      );
+
+      assert(
+        isObject(
+          data.cache?.mapBounds
+        ),
+        "King County response has no map-bounds cache information"
+      );
+    },
+  },
+
+  {
+    name:
+      "King County wide-map rejection",
+
+    run: async () => {
+      const data =
+        await getJson(
+          [
+            "/api/properties",
+            "?provider=king-county",
+            "&west=-122.55",
+            "&south=47.45",
+            "&east=-122.10",
+            "&north=47.85",
+          ].join(""),
           [
             400,
           ]
@@ -444,9 +514,9 @@ const tests = [
         typeof data.error ===
           "string" &&
         data.error.includes(
-          "does not support visible-map bounds searching"
+          "Zoom in"
         ),
-        "King County map-bounds rejection returned the wrong error message"
+        "King County wide-map request returned the wrong error message"
       );
     },
   },

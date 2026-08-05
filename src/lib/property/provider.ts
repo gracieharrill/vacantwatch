@@ -4,6 +4,14 @@ import type {
   PropertySignal,
 } from "./types";
 
+export class InvalidPropertyProviderQueryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name =
+      "InvalidPropertyProviderQueryError";
+  }
+}
+
 export type PropertyMapBounds = {
   west: number;
   south: number;

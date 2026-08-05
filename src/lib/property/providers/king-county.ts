@@ -39,11 +39,10 @@ export const kingCountyProvider = {
     vacancyCandidates: true,
 
     /*
-     * The current provider searches county-wide
-     * datasets but does not yet query by visible
-     * map boundaries.
+     * Parcel candidates are restricted to the
+     * visible map envelope before pagination.
      */
-    mapBounds: false,
+    mapBounds: true,
   },
 
   map: {
@@ -52,7 +51,7 @@ export const kingCountyProvider = {
       lng: -122.3321,
     },
 
-    defaultZoom: 10,
+    defaultZoom: 14,
   },
 
   normalizeParcelId:
