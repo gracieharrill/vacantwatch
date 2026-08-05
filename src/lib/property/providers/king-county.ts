@@ -32,6 +32,20 @@ export const kingCountyProvider = {
       "King County Tax Parcel Centroids with Assessor Attributes",
   },
 
+  capabilities: {
+    parcelSearch: true,
+    propertyDetails: true,
+    taxDelinquency: true,
+    vacancyCandidates: true,
+
+    /*
+     * The current provider searches county-wide
+     * datasets but does not yet query by visible
+     * map boundaries.
+     */
+    mapBounds: false,
+  },
+
   normalizeParcelId:
     normalizePin,
 

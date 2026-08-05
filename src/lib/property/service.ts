@@ -5,6 +5,7 @@ import type {
 import type {
   PropertyListResult,
   PropertyProvider,
+  PropertyProviderCapabilities,
   PropertyQueryOptions,
   PropertySourceInfo,
 } from "./provider";
@@ -87,6 +88,9 @@ export function getPropertyProviderSummary(
 
     source:
       provider.source,
+
+    capabilities:
+      provider.capabilities,
   };
 }
 
@@ -104,7 +108,19 @@ export function getAvailableProviders() {
 
     source:
       provider.source,
+
+    capabilities:
+      provider.capabilities,
   }));
+}
+
+export function getProviderCapabilities(
+  providerId: string =
+    DEFAULT_PROVIDER_ID
+): PropertyProviderCapabilities {
+  return getPropertyProvider(
+    providerId
+  ).capabilities;
 }
 
 export async function getProperties(
@@ -118,6 +134,42 @@ export async function getProperties(
     getPropertyProvider(
       providerId
     );
+
+  if (
+    !provider.capabilities
+      .parcelSearch
+  ) {
+    throw new Error(
+      `${provider.displayName} does not support parcel searching.`
+    );
+  }
+
+  if (
+    options.signal === "vacant" &&
+    !provider.capabilities
+      .vacancyCandidates
+  ) {
+    throw new Error(
+      `${provider.displayName} does not support vacancy-candidate filtering.`
+    );
+  }
+
+  if (
+    (
+      options.signal ===
+        "tax-delinquent" ||
+      (
+        options.minOutstanding ??
+        0
+      ) > 0
+    ) &&
+    !provider.capabilities
+      .taxDelinquency
+  ) {
+    throw new Error(
+      `${provider.displayName} does not support tax-delinquency filtering.`
+    );
+  }
 
   const result =
     await provider.getProperties(
@@ -135,6 +187,9 @@ export async function getProperties(
 
       jurisdiction:
         provider.jurisdiction,
+
+      capabilities:
+        provider.capabilities,
     },
   };
 }
@@ -149,6 +204,15 @@ export async function getPropertyById(
     getPropertyProvider(
       providerId
     );
+
+  if (
+    !provider.capabilities
+      .propertyDetails
+  ) {
+    throw new Error(
+      `${provider.displayName} does not support property details.`
+    );
+  }
 
   return provider.getPropertyById(
     parcelId

@@ -23,7 +23,7 @@ export type PropertyListResult = {
 };
 
 export type PropertySourceInfo = {
-  taxes: string;
+  taxes?: string;
   geometry: string;
   attributes?: string;
 };
@@ -35,12 +35,25 @@ export type PropertyJurisdiction = {
   countyFips: string;
 };
 
+/*
+ * These flags describe which features a provider
+ * can support with its available datasets.
+ */
+export type PropertyProviderCapabilities = {
+  parcelSearch: boolean;
+  propertyDetails: boolean;
+  taxDelinquency: boolean;
+  vacancyCandidates: boolean;
+  mapBounds: boolean;
+};
+
 export type PropertyProvider = {
   id: string;
   displayName: string;
 
   jurisdiction: PropertyJurisdiction;
   source: PropertySourceInfo;
+  capabilities: PropertyProviderCapabilities;
 
   normalizeParcelId(
     value: unknown
