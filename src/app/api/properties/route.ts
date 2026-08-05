@@ -5,7 +5,7 @@ import {
 
 import {
   getProperties,
-} from "../../../lib/property/king-county";
+} from "../../../lib/property/service";
 
 import type {
   PropertySignal,
@@ -80,8 +80,7 @@ export async function GET(
 ) {
   try {
     const searchParams =
-      request.nextUrl
-        .searchParams;
+      request.nextUrl.searchParams;
 
     const limit = parseInteger(
       searchParams.get("limit"),

@@ -5,11 +5,15 @@ import {
 
 import {
   getPropertyById,
-  normalizePin,
-} from "../../../../lib/property/king-county";
+  getPropertySource,
+  normalizeParcelId,
+} from "../../../../lib/property/service";
+
+export const runtime = "nodejs";
 
 export async function GET(
   _request: NextRequest,
+
   {
     params,
   }: {
@@ -19,15 +23,19 @@ export async function GET(
   }
 ) {
   try {
-    const { id } = await params;
-    const pin = normalizePin(id);
+    const { id } =
+      await params;
 
-    if (!pin) {
+    const parcelId =
+      normalizeParcelId(id);
+
+    if (!parcelId) {
       return NextResponse.json(
         {
           property: null,
+
           error:
-            "Parcel ID must contain exactly 10 digits.",
+            "Parcel ID must contain at least 10 digits.",
         },
         {
           status: 400,
@@ -36,12 +44,15 @@ export async function GET(
     }
 
     const property =
-      await getPropertyById(pin);
+      await getPropertyById(
+        parcelId
+      );
 
     if (!property) {
       return NextResponse.json(
         {
           property: null,
+
           error:
             "No matching tax-delinquent parcel was found.",
         },
@@ -53,10 +64,8 @@ export async function GET(
 
     return NextResponse.json({
       property,
-      source: {
-        taxes: "King County Delinquent Taxes",
-        geometry: "King County PARCEL_AREA_439",
-      },
+      source:
+        getPropertySource(),
     });
   } catch (error) {
     const message =
@@ -64,7 +73,10 @@ export async function GET(
         ? error.message
         : "Unknown property-detail error";
 
-    console.error("Property detail API error:", error);
+    console.error(
+      "Property detail API error:",
+      error
+    );
 
     return NextResponse.json(
       {
