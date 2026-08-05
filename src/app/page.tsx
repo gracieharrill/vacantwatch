@@ -1,13 +1,17 @@
 "use client";
 
 import {
-  FormEvent,
   useEffect,
   useMemo,
   useState,
 } from "react";
 
+import type {
+  FormEvent,
+} from "react";
+
 import dynamic from "next/dynamic";
+
 import {
   Filter,
   Search,
@@ -27,6 +31,40 @@ type ServerSignal =
   | "vacant"
   | "tax-delinquent";
 
+type ProviderCapabilities = {
+  parcelSearch: boolean;
+  propertyDetails: boolean;
+  taxDelinquency: boolean;
+  vacancyCandidates: boolean;
+  mapBounds: boolean;
+};
+
+type ProviderSummary = {
+  id: string;
+  displayName: string;
+
+  jurisdiction: {
+    countryCode: string;
+    stateCode: string;
+    countyName: string;
+    countyFips: string;
+  };
+
+  source: {
+    taxes?: string;
+    geometry: string;
+    attributes?: string;
+  };
+
+  capabilities: ProviderCapabilities;
+};
+
+type ProvidersResponse = {
+  defaultProviderId: string;
+  providers: ProviderSummary[];
+  error?: string;
+};
+
 type PaginationInfo = {
   limit: number;
   offset: number;
@@ -45,12 +83,51 @@ type PropertyPageResponse = {
   error?: string;
 };
 
+type PropertyDetailResponse = {
+  property?: PropertyDetail;
+  error?: string;
+};
+
 type PropertyPageOptions = {
+  providerId: string;
   offset: number;
   signal: ServerSignal;
   query: string;
   minOutstanding: number;
   abortSignal?: AbortSignal;
+};
+
+const fallbackProvider: ProviderSummary = {
+  id: "king-county",
+
+  displayName:
+    "King County, Washington",
+
+  jurisdiction: {
+    countryCode: "US",
+    stateCode: "WA",
+    countyName: "King County",
+    countyFips: "53033",
+  },
+
+  source: {
+    taxes:
+      "King County Delinquent Taxes",
+
+    geometry:
+      "King County PARCEL_AREA_439",
+
+    attributes:
+      "King County Tax Parcel Centroids with Assessor Attributes",
+  },
+
+  capabilities: {
+    parcelSearch: true,
+    propertyDetails: true,
+    taxDelinquency: true,
+    vacancyCandidates: true,
+    mapBounds: false,
+  },
 };
 
 const Map = dynamic(
@@ -71,8 +148,12 @@ const signalLabels: Record<
   string
 > = {
   vacant: "Vacant",
-  "tax-delinquent": "Tax Delinquent",
+
+  "tax-delinquent":
+    "Tax Delinquent",
+
   blighted: "Blighted",
+
   potential: "Potential",
 };
 
@@ -94,44 +175,77 @@ const signalBadgeClasses: Record<
 };
 
 const currencyFormatter =
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  });
+  new Intl.NumberFormat(
+    "en-US",
+    {
+      style: "currency",
+      currency: "USD",
+    }
+  );
 
 const numberFormatter =
-  new Intl.NumberFormat("en-US");
+  new Intl.NumberFormat(
+    "en-US"
+  );
 
 function getPropertySignals(
   property: Property
 ): PropertySignal[] {
-  return property.signals?.length
-    ? property.signals
-    : [property.status];
+  if (
+    property.signals &&
+    property.signals.length > 0
+  ) {
+    return property.signals;
+  }
+
+  return [
+    property.status,
+  ];
 }
 
 function parseMoneyInput(
   value: string
 ): number {
-  const cleaned = value.replace(
-    /[$,\s]/g,
-    ""
-  );
+  const cleaned =
+    value.replace(
+      /[$,\s]/g,
+      ""
+    );
 
   if (!cleaned) {
     return 0;
   }
 
-  const amount = Number(cleaned);
+  const amount =
+    Number(cleaned);
 
-  if (!Number.isFinite(amount)) {
+  if (
+    !Number.isFinite(
+      amount
+    )
+  ) {
     return 0;
   }
 
-  return Math.max(amount, 0);
+  return Math.max(
+    amount,
+    0
+  );
+}
+
+function isAbortError(
+  error: unknown
+): boolean {
+  return (
+    error instanceof
+      DOMException &&
+    error.name ===
+      "AbortError"
+  );
 }
 
 async function fetchPropertyPage({
+  providerId,
   offset,
   signal,
   query,
@@ -140,41 +254,61 @@ async function fetchPropertyPage({
 }: PropertyPageOptions): Promise<PropertyPageResponse> {
   const parameters =
     new URLSearchParams({
-      limit: String(PAGE_SIZE),
-      offset: String(offset),
+      provider:
+        providerId,
+
+      limit:
+        String(PAGE_SIZE),
+
+      offset:
+        String(offset),
     });
 
-  if (signal !== "all") {
+  if (
+    signal !== "all"
+  ) {
     parameters.set(
       "signal",
       signal
     );
   }
 
-  if (query.trim()) {
+  const cleanedQuery =
+    query.trim();
+
+  if (cleanedQuery) {
     parameters.set(
       "q",
-      query.trim()
+      cleanedQuery
     );
   }
 
-  if (minOutstanding > 0) {
+  if (
+    minOutstanding > 0
+  ) {
     parameters.set(
       "minOutstanding",
-      String(minOutstanding)
+      String(
+        minOutstanding
+      )
     );
   }
 
-  const response = await fetch(
-    `/api/properties?${parameters.toString()}`,
-    {
-      signal: abortSignal,
-      cache: "no-store",
-    }
-  );
+  const response =
+    await fetch(
+      `/api/properties?${parameters.toString()}`,
+      {
+        signal:
+          abortSignal,
+
+        cache:
+          "no-store",
+      }
+    );
 
   const data =
-    (await response.json()) as PropertyPageResponse;
+    (await response.json()) as
+      PropertyPageResponse;
 
   if (!response.ok) {
     throw new Error(
@@ -183,7 +317,11 @@ async function fetchPropertyPage({
     );
   }
 
-  if (!Array.isArray(data.properties)) {
+  if (
+    !Array.isArray(
+      data.properties
+    )
+  ) {
     throw new Error(
       "The property API returned invalid property data"
     );
@@ -199,25 +337,61 @@ async function fetchPropertyPage({
 }
 
 export default function Home() {
-  const [properties, setProperties] =
-    useState<Property[]>([]);
+  const [
+    providers,
+    setProviders,
+  ] = useState<
+    ProviderSummary[]
+  >([]);
 
-  const [loading, setLoading] =
-    useState(true);
+  const [
+    providersReady,
+    setProvidersReady,
+  ] = useState(false);
 
-  const [loadingMore, setLoadingMore] =
-    useState(false);
+  const [
+    providersError,
+    setProvidersError,
+  ] = useState("");
 
-  const [error, setError] =
-    useState("");
+  const [
+    selectedProviderId,
+    setSelectedProviderId,
+  ] = useState(
+    fallbackProvider.id
+  );
+
+  const [
+    properties,
+    setProperties,
+  ] = useState<
+    Property[]
+  >([]);
+
+  const [
+    loading,
+    setLoading,
+  ] = useState(true);
+
+  const [
+    loadingMore,
+    setLoadingMore,
+  ] = useState(false);
+
+  const [
+    error,
+    setError,
+  ] = useState("");
 
   const [
     loadMoreError,
     setLoadMoreError,
   ] = useState("");
 
-  const [nextOffset, setNextOffset] =
-    useState(0);
+  const [
+    nextOffset,
+    setNextOffset,
+  ] = useState(0);
 
   const [
     hasMoreProperties,
@@ -237,14 +411,16 @@ export default function Home() {
   const [
     selectedPropertyId,
     setSelectedPropertyId,
-  ] = useState<string | null>(null);
+  ] = useState<
+    string | null
+  >(null);
 
   const [
     propertyDetail,
     setPropertyDetail,
-  ] = useState<PropertyDetail | null>(
-    null
-  );
+  ] = useState<
+    PropertyDetail | null
+  >(null);
 
   const [
     detailLoading,
@@ -256,9 +432,6 @@ export default function Home() {
     setDetailError,
   ] = useState("");
 
-  /*
-   * Values currently typed into the form.
-   */
   const [
     searchInput,
     setSearchInput,
@@ -269,9 +442,6 @@ export default function Home() {
     setMinOutstandingInput,
   ] = useState("");
 
-  /*
-   * Values currently applied to the API.
-   */
   const [
     appliedQuery,
     setAppliedQuery,
@@ -285,13 +455,189 @@ export default function Home() {
   const [
     serverSignal,
     setServerSignal,
-  ] = useState<ServerSignal>("all");
+  ] = useState<
+    ServerSignal
+  >("all");
+
+  const selectedProvider =
+    useMemo(
+      () =>
+        providers.find(
+          (provider) =>
+            provider.id ===
+            selectedProviderId
+        ) ??
+        fallbackProvider,
+      [
+        providers,
+        selectedProviderId,
+      ]
+    );
+
+  const capabilities =
+    selectedProvider
+      .capabilities;
 
   /*
-   * Load the first page whenever an applied
-   * server-side filter changes.
+   * Load provider choices and restore
+   * bookmarked provider and parcel values.
    */
   useEffect(() => {
+    const controller =
+      new AbortController();
+
+    async function loadProviders() {
+      try {
+        setProvidersError(
+          ""
+        );
+
+        const response =
+          await fetch(
+            "/api/providers",
+            {
+              signal:
+                controller.signal,
+
+              cache:
+                "no-store",
+            }
+          );
+
+        const data =
+          (await response.json()) as
+            ProvidersResponse;
+
+        if (!response.ok) {
+          throw new Error(
+            data.error ||
+              "Unable to load property providers"
+          );
+        }
+
+        if (
+          !Array.isArray(
+            data.providers
+          ) ||
+          data.providers.length ===
+            0
+        ) {
+          throw new Error(
+            "No property providers are available"
+          );
+        }
+
+        setProviders(
+          data.providers
+        );
+
+        const parameters =
+          new URLSearchParams(
+            window.location
+              .search
+          );
+
+        const requestedProvider =
+          parameters
+            .get(
+              "provider"
+            )
+            ?.trim()
+            .toLowerCase();
+
+        const providerExists =
+          Boolean(
+            requestedProvider &&
+              data.providers.some(
+                (
+                  provider
+                ) =>
+                  provider.id ===
+                  requestedProvider
+              )
+          );
+
+        const nextProviderId =
+          providerExists &&
+          requestedProvider
+            ? requestedProvider
+            : data.defaultProviderId;
+
+        setSelectedProviderId(
+          nextProviderId
+        );
+
+        const bookmarkedParcel =
+          parameters
+            .get("parcel")
+            ?.trim();
+
+        if (
+          bookmarkedParcel &&
+          bookmarkedParcel.length <=
+            50
+        ) {
+          setSelectedPropertyId(
+            bookmarkedParcel
+          );
+        }
+      } catch (
+        requestError
+      ) {
+        if (
+          isAbortError(
+            requestError
+          )
+        ) {
+          return;
+        }
+
+        console.error(
+          requestError
+        );
+
+        setProviders([
+          fallbackProvider,
+        ]);
+
+        setSelectedProviderId(
+          fallbackProvider.id
+        );
+
+        setProvidersError(
+          requestError instanceof
+            Error
+            ? requestError.message
+            : "Unable to load providers"
+        );
+      } finally {
+        if (
+          !controller.signal
+            .aborted
+        ) {
+          setProvidersReady(
+            true
+          );
+        }
+      }
+    }
+
+    void loadProviders();
+
+    return () => {
+      controller.abort();
+    };
+  }, []);
+
+  /*
+   * Load the first property page whenever
+   * the provider or applied filters change.
+   */
+  useEffect(() => {
+    if (!providersReady) {
+      return;
+    }
+
     const controller =
       new AbortController();
 
@@ -299,18 +645,41 @@ export default function Home() {
       try {
         setLoading(true);
         setError("");
-        setLoadMoreError("");
+        setLoadMoreError(
+          ""
+        );
+
         setProperties([]);
         setNextOffset(0);
-        setHasMoreProperties(false);
+
+        setHasMoreProperties(
+          false
+        );
+
+        setTotalProperties(
+          0
+        );
+
+        setUnfilteredTotalProperties(
+          0
+        );
 
         const data =
           await fetchPropertyPage({
+            providerId:
+              selectedProviderId,
+
             offset: 0,
-            signal: serverSignal,
-            query: appliedQuery,
+
+            signal:
+              serverSignal,
+
+            query:
+              appliedQuery,
+
             minOutstanding:
               appliedMinOutstanding,
+
             abortSignal:
               controller.signal,
           });
@@ -320,7 +689,8 @@ export default function Home() {
         );
 
         setNextOffset(
-          data.pagination.nextOffset
+          data.pagination
+            .nextOffset
         );
 
         setHasMoreProperties(
@@ -329,78 +699,82 @@ export default function Home() {
         );
 
         setTotalProperties(
-          data.pagination.totalProperties
+          data.pagination
+            .totalProperties
         );
 
         setUnfilteredTotalProperties(
           data.pagination
             .unfilteredTotalProperties
         );
-      } catch (requestError) {
+      } catch (
+        requestError
+      ) {
         if (
-          requestError instanceof
-            DOMException &&
-          requestError.name ===
-            "AbortError"
+          isAbortError(
+            requestError
+          )
         ) {
           return;
         }
 
-        console.error(requestError);
+        console.error(
+          requestError
+        );
 
         setError(
-          requestError instanceof Error
+          requestError instanceof
+            Error
             ? requestError.message
             : "Unable to load properties"
         );
       } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
+        if (
+          !controller.signal
+            .aborted
+        ) {
+          setLoading(
+            false
+          );
         }
       }
     }
 
-    loadInitialPage();
+    void loadInitialPage();
 
     return () => {
       controller.abort();
     };
   }, [
+    providersReady,
+    selectedProviderId,
     serverSignal,
     appliedQuery,
     appliedMinOutstanding,
   ]);
 
   /*
-   * Read a bookmarked parcel from the URL.
+   * Keep the selected provider and parcel
+   * in the browser URL.
    */
   useEffect(() => {
-    const parameters =
-      new URLSearchParams(
-        window.location.search
+    if (!providersReady) {
+      return;
+    }
+
+    const url =
+      new URL(
+        window.location.href
       );
 
-    const parcelId =
-      parameters.get("parcel");
+    url.searchParams.set(
+      "provider",
+      selectedProviderId
+    );
 
     if (
-      parcelId &&
-      /^\d{10}$/.test(parcelId)
+      selectedPropertyId
     ) {
-      setSelectedPropertyId(
-        parcelId
-      );
-    }
-  }, []);
-
-  /*
-   * Keep the selected parcel in the URL.
-   */
-  useEffect(() => {
-    const url =
-      new URL(window.location.href);
-
-    if (selectedPropertyId) {
       url.searchParams.set(
         "parcel",
         selectedPropertyId
@@ -411,44 +785,96 @@ export default function Home() {
       );
     }
 
-    window.history.replaceState(
-      {},
-      "",
-      `${url.pathname}${url.search}${url.hash}`
-    );
-  }, [selectedPropertyId]);
+    window.history
+      .replaceState(
+        {},
+        "",
+        `${url.pathname}${url.search}${url.hash}`
+      );
+  }, [
+    providersReady,
+    selectedProviderId,
+    selectedPropertyId,
+  ]);
 
   /*
-   * Load the complete record for the
-   * selected parcel.
+   * Load the complete selected property record.
    */
   useEffect(() => {
-    if (!selectedPropertyId) {
-      setPropertyDetail(null);
-      setDetailError("");
-      setDetailLoading(false);
+    if (
+      !providersReady ||
+      selectedPropertyId ===
+        null
+    ) {
+      setPropertyDetail(
+        null
+      );
+
+      setDetailError(
+        ""
+      );
+
+      setDetailLoading(
+        false
+      );
+
       return;
     }
+
+    /*
+     * Capture definite string values before
+     * entering the asynchronous function.
+     */
+    const parcelIdForRequest:
+      string =
+        selectedPropertyId;
+
+    const providerIdForRequest:
+      string =
+        selectedProviderId;
 
     const controller =
       new AbortController();
 
     async function loadPropertyDetail() {
       try {
-        setDetailLoading(true);
-        setDetailError("");
-        setPropertyDetail(null);
-
-        const response = await fetch(
-          `/api/properties/${selectedPropertyId}`,
-          {
-            signal: controller.signal,
-            cache: "no-store",
-          }
+        setDetailLoading(
+          true
         );
 
+        setDetailError(
+          ""
+        );
+
+        setPropertyDetail(
+          null
+        );
+
+        const encodedParcelId =
+          encodeURIComponent(
+            parcelIdForRequest
+          );
+
+        const encodedProviderId =
+          encodeURIComponent(
+            providerIdForRequest
+          );
+
+        const response =
+          await fetch(
+            `/api/properties/${encodedParcelId}?provider=${encodedProviderId}`,
+            {
+              signal:
+                controller.signal,
+
+              cache:
+                "no-store",
+            }
+          );
+
         const data =
-          await response.json();
+          (await response.json()) as
+            PropertyDetailResponse;
 
         if (!response.ok) {
           throw new Error(
@@ -466,36 +892,49 @@ export default function Home() {
         setPropertyDetail(
           data.property
         );
-      } catch (requestError) {
+      } catch (
+        requestError
+      ) {
         if (
-          requestError instanceof
-            DOMException &&
-          requestError.name ===
-            "AbortError"
+          isAbortError(
+            requestError
+          )
         ) {
           return;
         }
 
-        console.error(requestError);
+        console.error(
+          requestError
+        );
 
         setDetailError(
-          requestError instanceof Error
+          requestError instanceof
+            Error
             ? requestError.message
             : "Unable to load property details"
         );
       } finally {
-        if (!controller.signal.aborted) {
-          setDetailLoading(false);
+        if (
+          !controller.signal
+            .aborted
+        ) {
+          setDetailLoading(
+            false
+          );
         }
       }
     }
 
-    loadPropertyDetail();
+    void loadPropertyDetail();
 
     return () => {
       controller.abort();
     };
-  }, [selectedPropertyId]);
+  }, [
+    providersReady,
+    selectedProviderId,
+    selectedPropertyId,
+  ]);
 
   const selectedProperty =
     useMemo(
@@ -504,7 +943,8 @@ export default function Home() {
           (property) =>
             property.id ===
             selectedPropertyId
-        ) ?? null,
+        ) ??
+        null,
       [
         properties,
         selectedPropertyId,
@@ -523,9 +963,31 @@ export default function Home() {
       : [];
 
   const filtersAreApplied =
-    serverSignal !== "all" ||
-    appliedQuery.length > 0 ||
-    appliedMinOutstanding > 0;
+    serverSignal !==
+      "all" ||
+    appliedQuery.length >
+      0 ||
+    appliedMinOutstanding >
+      0;
+
+  const hasTaxData =
+    Boolean(
+      displayedDetail &&
+        (
+          displayedDetail
+            .billedAmount !==
+            undefined ||
+          displayedDetail
+            .paidAmount !==
+            undefined ||
+          displayedDetail
+            .outstandingAmount !==
+            undefined ||
+          displayedDetail
+            .taxRecordCount !==
+            undefined
+        )
+    );
 
   async function loadMoreProperties() {
     if (
@@ -537,51 +999,71 @@ export default function Home() {
     }
 
     try {
-      setLoadingMore(true);
-      setLoadMoreError("");
+      setLoadingMore(
+        true
+      );
+
+      setLoadMoreError(
+        ""
+      );
 
       const data =
         await fetchPropertyPage({
-          offset: nextOffset,
-          signal: serverSignal,
-          query: appliedQuery,
+          providerId:
+            selectedProviderId,
+
+          offset:
+            nextOffset,
+
+          signal:
+            serverSignal,
+
+          query:
+            appliedQuery,
+
           minOutstanding:
             appliedMinOutstanding,
         });
 
-      setProperties((current) => {
-        const propertiesById =
-          new globalThis.Map<
-            string,
-            Property
-          >();
+      setProperties(
+        (
+          currentProperties
+        ) => {
+          const propertiesById =
+            new globalThis.Map<
+              string,
+              Property
+            >();
 
-        for (
-          const property of current
-        ) {
-          propertiesById.set(
-            property.id,
-            property
+          for (
+            const property of
+            currentProperties
+          ) {
+            propertiesById.set(
+              property.id,
+              property
+            );
+          }
+
+          for (
+            const property of
+            data.properties
+          ) {
+            propertiesById.set(
+              property.id,
+              property
+            );
+          }
+
+          return Array.from(
+            propertiesById.values()
           );
         }
-
-        for (
-          const property of
-          data.properties
-        ) {
-          propertiesById.set(
-            property.id,
-            property
-          );
-        }
-
-        return Array.from(
-          propertiesById.values()
-        );
-      });
+      );
 
       setNextOffset(
-        data.pagination.nextOffset
+        data.pagination
+          .nextOffset
       );
 
       setHasMoreProperties(
@@ -590,28 +1072,37 @@ export default function Home() {
       );
 
       setTotalProperties(
-        data.pagination.totalProperties
+        data.pagination
+          .totalProperties
       );
 
       setUnfilteredTotalProperties(
         data.pagination
           .unfilteredTotalProperties
       );
-    } catch (requestError) {
-      console.error(requestError);
+    } catch (
+      requestError
+    ) {
+      console.error(
+        requestError
+      );
 
       setLoadMoreError(
-        requestError instanceof Error
+        requestError instanceof
+          Error
           ? requestError.message
           : "Unable to load more properties"
       );
     } finally {
-      setLoadingMore(false);
+      setLoadingMore(
+        false
+      );
     }
   }
 
   function applyFilters(
-    event: FormEvent<HTMLFormElement>
+    event:
+      FormEvent<HTMLFormElement>
   ) {
     event.preventDefault();
 
@@ -620,18 +1111,64 @@ export default function Home() {
     );
 
     setAppliedMinOutstanding(
-      parseMoneyInput(
-        minOutstandingInput
-      )
+      capabilities
+        .taxDelinquency
+        ? parseMoneyInput(
+            minOutstandingInput
+          )
+        : 0
     );
   }
 
   function clearFilters() {
     setSearchInput("");
-    setMinOutstandingInput("");
+    setMinOutstandingInput(
+      ""
+    );
+
     setAppliedQuery("");
-    setAppliedMinOutstanding(0);
-    setServerSignal("all");
+    setAppliedMinOutstanding(
+      0
+    );
+
+    setServerSignal(
+      "all"
+    );
+  }
+
+  function changeProvider(
+    providerId: string
+  ) {
+    setSelectedProviderId(
+      providerId
+    );
+
+    setSearchInput("");
+    setMinOutstandingInput(
+      ""
+    );
+
+    setAppliedQuery("");
+    setAppliedMinOutstanding(
+      0
+    );
+
+    setServerSignal(
+      "all"
+    );
+
+    setSelectedPropertyId(
+      null
+    );
+
+    setPropertyDetail(
+      null
+    );
+
+    setDetailError("");
+    setLoadMoreError(
+      ""
+    );
   }
 
   function selectProperty(
@@ -643,8 +1180,14 @@ export default function Home() {
   }
 
   function clearSelectedProperty() {
-    setSelectedPropertyId(null);
-    setPropertyDetail(null);
+    setSelectedPropertyId(
+      null
+    );
+
+    setPropertyDetail(
+      null
+    );
+
     setDetailError("");
   }
 
@@ -657,7 +1200,10 @@ export default function Home() {
           </h1>
 
           <div className="mt-1 text-sm text-slate-500">
-            King County
+            {
+              selectedProvider
+                .displayName
+            }
           </div>
 
           <div className="mt-2 text-xs text-slate-500">
@@ -685,24 +1231,86 @@ export default function Home() {
                 {numberFormatter.format(
                   unfilteredTotalProperties
                 )}{" "}
-                total delinquent parcels
+                total parcels
+                available
               </div>
             )}
         </header>
 
         <form
-          onSubmit={applyFilters}
+          onSubmit={
+            applyFilters
+          }
           className="border-b border-slate-200 p-4"
         >
           <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-slate-700">
             <Filter className="h-4 w-4" />
-            County-wide filters
+            Property source
           </div>
 
           <label className="block">
             <span className="text-xs font-medium text-slate-600">
-              Search address, property
-              name, or parcel ID
+              County or
+              provider
+            </span>
+
+            <select
+              value={
+                selectedProviderId
+              }
+              onChange={(
+                event
+              ) =>
+                changeProvider(
+                  event.target
+                    .value
+                )
+              }
+              disabled={
+                !providersReady ||
+                loading
+              }
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+            >
+              {providers.map(
+                (
+                  provider
+                ) => (
+                  <option
+                    key={
+                      provider.id
+                    }
+                    value={
+                      provider.id
+                    }
+                  >
+                    {
+                      provider.displayName
+                    }
+                  </option>
+                )
+              )}
+            </select>
+          </label>
+
+          {providersError && (
+            <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+              {providersError}
+            </div>
+          )}
+
+          <div className="mb-3 mt-5 flex items-center gap-2 text-sm font-semibold text-slate-700">
+            <Search className="h-4 w-4" />
+            County-wide
+            filters
+          </div>
+
+          <label className="block">
+            <span className="text-xs font-medium text-slate-600">
+              Search address,
+              property name,
+              owner, or parcel
+              ID
             </span>
 
             <div className="relative mt-1">
@@ -710,13 +1318,18 @@ export default function Home() {
 
               <input
                 type="search"
-                value={searchInput}
-                onChange={(event) =>
+                value={
+                  searchInput
+                }
+                onChange={(
+                  event
+                ) =>
                   setSearchInput(
-                    event.target.value
+                    event.target
+                      .value
                   )
                 }
-                placeholder="Example: BEACON"
+                placeholder="Enter search text"
                 className="w-full rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -724,28 +1337,48 @@ export default function Home() {
 
           <label className="mt-3 block">
             <span className="text-xs font-medium text-slate-600">
-              Property category
+              Property
+              category
             </span>
 
             <select
-              value={serverSignal}
-              onChange={(event) =>
+              value={
+                serverSignal
+              }
+              onChange={(
+                event
+              ) =>
                 setServerSignal(
                   event.target
-                    .value as ServerSignal
+                    .value as
+                    ServerSignal
                 )
               }
               className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="all">
-                All delinquent parcels
+                All available
+                parcels
               </option>
 
-              <option value="vacant">
-                Vacant candidates
+              <option
+                value="vacant"
+                disabled={
+                  !capabilities
+                    .vacancyCandidates
+                }
+              >
+                Vacant
+                candidates
               </option>
 
-              <option value="tax-delinquent">
+              <option
+                value="tax-delinquent"
+                disabled={
+                  !capabilities
+                    .taxDelinquency
+                }
+              >
                 Tax delinquent
               </option>
             </select>
@@ -753,7 +1386,9 @@ export default function Home() {
 
           <label className="mt-3 block">
             <span className="text-xs font-medium text-slate-600">
-              Minimum outstanding balance
+              Minimum
+              outstanding
+              balance
             </span>
 
             <input
@@ -762,20 +1397,34 @@ export default function Home() {
               value={
                 minOutstandingInput
               }
-              onChange={(event) =>
+              onChange={(
+                event
+              ) =>
                 setMinOutstandingInput(
-                  event.target.value
+                  event.target
+                    .value
                 )
               }
-              placeholder="Example: 5000"
-              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              disabled={
+                !capabilities
+                  .taxDelinquency
+              }
+              placeholder={
+                capabilities
+                  .taxDelinquency
+                  ? "Example: 5000"
+                  : "Not available"
+              }
+              className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-400"
             />
           </label>
 
           <div className="mt-4 grid grid-cols-2 gap-2">
             <button
               type="submit"
-              disabled={loading}
+              disabled={
+                loading
+              }
               className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
             >
               {loading
@@ -785,7 +1434,9 @@ export default function Home() {
 
             <button
               type="button"
-              onClick={clearFilters}
+              onClick={
+                clearFilters
+              }
               disabled={
                 loading ||
                 !filtersAreApplied
@@ -796,12 +1447,38 @@ export default function Home() {
             </button>
           </div>
 
+          {!capabilities
+            .taxDelinquency && (
+            <div className="mt-3 rounded-lg bg-blue-50 p-2 text-xs text-blue-800">
+              This provider
+              supplies parcel
+              information but
+              does not currently
+              provide structured
+              delinquent-tax
+              balances.
+            </div>
+          )}
+
+          {!capabilities
+            .vacancyCandidates && (
+            <div className="mt-2 rounded-lg bg-slate-100 p-2 text-xs text-slate-600">
+              Vacancy-candidate
+              filtering is not
+              yet available from
+              this provider.
+            </div>
+          )}
+
           {serverSignal ===
             "vacant" && (
             <div className="mt-3 rounded-lg bg-amber-50 p-2 text-xs text-amber-800">
-              Vacant candidates include
-              assessor records marked vacant
-              or showing zero building area.
+              Vacant candidates
+              may include
+              assessor records
+              marked vacant or
+              showing zero
+              building area.
             </div>
           )}
         </form>
@@ -809,22 +1486,25 @@ export default function Home() {
         <div className="flex-1 overflow-y-auto">
           {loading && (
             <div className="p-4 text-sm text-slate-500">
-              Searching King County
+              Searching property
               records...
             </div>
           )}
 
-          {!loading && error && (
-            <div className="m-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              {error}
-            </div>
-          )}
+          {!loading &&
+            error && (
+              <div className="m-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {error}
+              </div>
+            )}
 
           {!loading &&
             !error &&
-            properties.length === 0 && (
+            properties.length ===
+              0 && (
               <div className="p-4 text-sm text-slate-500">
-                No properties match these
+                No properties
+                match these
                 filters.
               </div>
             )}
@@ -832,7 +1512,9 @@ export default function Home() {
           {!loading &&
             !error &&
             properties.map(
-              (property) => {
+              (
+                property
+              ) => {
                 const selected =
                   property.id ===
                   selectedPropertyId;
@@ -840,7 +1522,9 @@ export default function Home() {
                 return (
                   <button
                     type="button"
-                    key={property.id}
+                    key={
+                      property.id
+                    }
                     onClick={() =>
                       selectProperty(
                         property
@@ -853,11 +1537,15 @@ export default function Home() {
                     }`}
                   >
                     <div className="text-sm font-medium text-slate-800">
-                      {property.address}
+                      {
+                        property.address
+                      }
                     </div>
 
                     <SignalBadges
-                      property={property}
+                      property={
+                        property
+                      }
                     />
 
                     {property.propertyName && (
@@ -900,42 +1588,50 @@ export default function Home() {
               }
             )}
 
-          {!loading && !error && (
-            <div className="p-4">
-              {loadMoreError && (
-                <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-                  {loadMoreError}
-                </div>
-              )}
+          {!loading &&
+            !error && (
+              <div className="p-4">
+                {loadMoreError && (
+                  <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                    {
+                      loadMoreError
+                    }
+                  </div>
+                )}
 
-              {hasMoreProperties ? (
-                <button
-                  type="button"
-                  onClick={
-                    loadMoreProperties
-                  }
-                  disabled={loadingMore}
-                  className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
-                >
-                  {loadingMore
-                    ? "Loading more..."
-                    : "Load More Properties"}
-                </button>
-              ) : properties.length >
-                0 ? (
-                <div className="text-center text-sm text-slate-500">
-                  All matching properties
-                  have been loaded.
-                </div>
-              ) : null}
-            </div>
-          )}
+                {hasMoreProperties ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void loadMoreProperties();
+                    }}
+                    disabled={
+                      loadingMore
+                    }
+                    className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+                  >
+                    {loadingMore
+                      ? "Loading more..."
+                      : "Load More Properties"}
+                  </button>
+                ) : properties.length >
+                  0 ? (
+                  <div className="text-center text-sm text-slate-500">
+                    All matching
+                    properties have
+                    been loaded.
+                  </div>
+                ) : null}
+              </div>
+            )}
         </div>
       </aside>
 
       <main className="relative flex-1 overflow-hidden">
         <Map
-          properties={properties}
+          properties={
+            properties
+          }
           selectedPropertyId={
             selectedPropertyId
           }
@@ -949,17 +1645,23 @@ export default function Home() {
             <header className="flex items-start justify-between border-b border-slate-200 p-5">
               <div className="min-w-0">
                 <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Property details
+                  {
+                    selectedProvider
+                      .displayName
+                  }
                 </div>
 
                 <h2 className="mt-1 truncate text-xl font-bold text-slate-900">
-                  {displayedDetail?.address ??
+                  {displayedDetail
+                    ?.address ??
                     `Parcel ${selectedPropertyId}`}
                 </h2>
 
                 <div className="mt-1 text-sm text-slate-500">
                   Parcel ID:{" "}
-                  {selectedPropertyId}
+                  {
+                    selectedPropertyId
+                  }
                 </div>
               </div>
 
@@ -978,8 +1680,8 @@ export default function Home() {
             <div className="flex-1 overflow-y-auto p-5">
               {detailLoading && (
                 <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-700">
-                  Loading complete property
-                  record...
+                  Loading complete
+                  property record...
                 </div>
               )}
 
@@ -993,14 +1695,19 @@ export default function Home() {
                 <div className="space-y-6">
                   <section>
                     <h3 className="text-sm font-semibold text-slate-900">
-                      Property signals
+                      Property
+                      signals
                     </h3>
 
                     <div className="mt-3 flex flex-wrap gap-2">
                       {displayedSignals.map(
-                        (signal) => (
+                        (
+                          signal
+                        ) => (
                           <span
-                            key={signal}
+                            key={
+                              signal
+                            }
                             className={`rounded-full border px-3 py-1 text-xs font-semibold ${
                               signalBadgeClasses[
                                 signal
@@ -1070,7 +1777,8 @@ export default function Home() {
 
                   <section>
                     <h3 className="text-sm font-semibold text-slate-900">
-                      Assessor information
+                      Assessor
+                      information
                     </h3>
 
                     <dl className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-200">
@@ -1156,7 +1864,8 @@ export default function Home() {
 
                   <section>
                     <h3 className="text-sm font-semibold text-slate-900">
-                      Parcel information
+                      Parcel
+                      information
                     </h3>
 
                     <dl className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-200">
@@ -1176,102 +1885,128 @@ export default function Home() {
 
                       <DetailRow
                         label="Latitude"
-                        value={displayedDetail.lat.toFixed(
-                          6
-                        )}
+                        value={
+                          displayedDetail.lat.toFixed(
+                            6
+                          )
+                        }
                       />
 
                       <DetailRow
                         label="Longitude"
-                        value={displayedDetail.lng.toFixed(
-                          6
-                        )}
-                      />
-                    </dl>
-                  </section>
-
-                  <section>
-                    <h3 className="text-sm font-semibold text-slate-900">
-                      Tax years
-                    </h3>
-
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {displayedDetail.billYears
-                        ?.length ? (
-                        displayedDetail.billYears.map(
-                          (year) => (
-                            <span
-                              key={year}
-                              className="rounded-full bg-orange-100 px-3 py-1 text-xs font-medium text-orange-700"
-                            >
-                              {year}
-                            </span>
+                        value={
+                          displayedDetail.lng.toFixed(
+                            6
                           )
-                        )
-                      ) : (
-                        <span className="text-sm text-slate-500">
-                          No tax years
-                          available.
-                        </span>
-                      )}
-                    </div>
-                  </section>
-
-                  <section>
-                    <h3 className="text-sm font-semibold text-slate-900">
-                      Tax summary
-                    </h3>
-
-                    <dl className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-200">
-                      <DetailRow
-                        label="Billed"
-                        value={
-                          displayedDetail.billedAmount !==
-                          undefined
-                            ? currencyFormatter.format(
-                                displayedDetail.billedAmount
-                              )
-                            : undefined
-                        }
-                      />
-
-                      <DetailRow
-                        label="Paid"
-                        value={
-                          displayedDetail.paidAmount !==
-                          undefined
-                            ? currencyFormatter.format(
-                                displayedDetail.paidAmount
-                              )
-                            : undefined
-                        }
-                      />
-
-                      <DetailRow
-                        label="Outstanding"
-                        value={
-                          displayedDetail.outstandingAmount !==
-                          undefined
-                            ? currencyFormatter.format(
-                                displayedDetail.outstandingAmount
-                              )
-                            : undefined
-                        }
-                      />
-
-                      <DetailRow
-                        label="Tax records"
-                        value={
-                          displayedDetail.taxRecordCount
                         }
                       />
                     </dl>
                   </section>
 
-                  {propertyDetail?.taxRecords && (
+                  {hasTaxData ? (
+                    <>
+                      <section>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Tax years
+                        </h3>
+
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {displayedDetail.billYears
+                            ?.length ? (
+                            displayedDetail.billYears.map(
+                              (
+                                year
+                              ) => (
+                                <span
+                                  key={
+                                    year
+                                  }
+                                  className="rounded-full bg-orange-100 px-3 py-1 text-xs font-medium text-orange-700"
+                                >
+                                  {
+                                    year
+                                  }
+                                </span>
+                              )
+                            )
+                          ) : (
+                            <span className="text-sm text-slate-500">
+                              No tax
+                              years
+                              available.
+                            </span>
+                          )}
+                        </div>
+                      </section>
+
+                      <section>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          Tax summary
+                        </h3>
+
+                        <dl className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-200">
+                          <DetailRow
+                            label="Billed"
+                            value={
+                              displayedDetail.billedAmount !==
+                              undefined
+                                ? currencyFormatter.format(
+                                    displayedDetail.billedAmount
+                                  )
+                                : undefined
+                            }
+                          />
+
+                          <DetailRow
+                            label="Paid"
+                            value={
+                              displayedDetail.paidAmount !==
+                              undefined
+                                ? currencyFormatter.format(
+                                    displayedDetail.paidAmount
+                                  )
+                                : undefined
+                            }
+                          />
+
+                          <DetailRow
+                            label="Outstanding"
+                            value={
+                              displayedDetail.outstandingAmount !==
+                              undefined
+                                ? currencyFormatter.format(
+                                    displayedDetail.outstandingAmount
+                                  )
+                                : undefined
+                            }
+                          />
+
+                          <DetailRow
+                            label="Tax records"
+                            value={
+                              displayedDetail.taxRecordCount
+                            }
+                          />
+                        </dl>
+                      </section>
+                    </>
+                  ) : (
+                    <section className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-800">
+                      Structured
+                      delinquent-tax
+                      data is not
+                      available from
+                      this provider.
+                    </section>
+                  )}
+
+                  {propertyDetail
+                    ?.taxRecords
+                    ?.length ? (
                     <section>
                       <h3 className="text-sm font-semibold text-slate-900">
-                        Individual tax records
+                        Individual tax
+                        records
                       </h3>
 
                       <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200">
@@ -1332,7 +2067,7 @@ export default function Home() {
                         </table>
                       </div>
                     </section>
-                  )}
+                  ) : null}
                 </div>
               )}
             </div>
@@ -1352,16 +2087,28 @@ function SignalBadges({
     <div className="mt-2 flex flex-wrap gap-1.5">
       {getPropertySignals(
         property
-      ).map((signal) => (
-        <span
-          key={signal}
-          className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
-            signalBadgeClasses[signal]
-          }`}
-        >
-          {signalLabels[signal]}
-        </span>
-      ))}
+      ).map(
+        (
+          signal
+        ) => (
+          <span
+            key={
+              signal
+            }
+            className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
+              signalBadgeClasses[
+                signal
+              ]
+            }`}
+          >
+            {
+              signalLabels[
+                signal
+              ]
+            }
+          </span>
+        )
+      )}
     </div>
   );
 }
@@ -1391,6 +2138,7 @@ function DetailRow({
   value,
 }: {
   label: string;
+
   value:
     | string
     | number
@@ -1404,7 +2152,8 @@ function DetailRow({
       </dt>
 
       <dd className="text-right font-medium text-slate-900">
-        {value ?? "Not available"}
+        {value ??
+          "Not available"}
       </dd>
     </div>
   );
