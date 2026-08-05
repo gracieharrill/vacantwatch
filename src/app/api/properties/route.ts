@@ -4,7 +4,10 @@ import {
 } from "next/server";
 
 import {
+  DEFAULT_PROVIDER_ID,
+  getAvailableProviders,
   getProperties,
+  hasPropertyProvider,
 } from "../../../lib/property/service";
 
 import type {
@@ -75,12 +78,52 @@ function parseSignal(
   return "all";
 }
 
+function parseProviderId(
+  value: string | null
+): string {
+  return (
+    value
+      ?.trim()
+      .toLowerCase() ||
+    DEFAULT_PROVIDER_ID
+  );
+}
+
 export async function GET(
   request: NextRequest
 ) {
   try {
     const searchParams =
       request.nextUrl.searchParams;
+
+    const providerId =
+      parseProviderId(
+        searchParams.get(
+          "provider"
+        )
+      );
+
+    if (
+      !hasPropertyProvider(
+        providerId
+      )
+    ) {
+      return NextResponse.json(
+        {
+          properties: [],
+          count: 0,
+
+          error:
+            `Unknown property provider: ${providerId}`,
+
+          availableProviders:
+            getAvailableProviders(),
+        },
+        {
+          status: 400,
+        }
+      );
+    }
 
     const limit = parseInteger(
       searchParams.get("limit"),
@@ -112,13 +155,16 @@ export async function GET(
         .slice(0, 100);
 
     const result =
-      await getProperties({
-        limit,
-        offset,
-        signal,
-        minOutstanding,
-        query,
-      });
+      await getProperties(
+        {
+          limit,
+          offset,
+          signal,
+          minOutstanding,
+          query,
+        },
+        providerId
+      );
 
     return NextResponse.json(
       result

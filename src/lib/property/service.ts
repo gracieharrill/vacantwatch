@@ -27,20 +27,67 @@ const providers:
     ],
   ]);
 
+function cleanProviderId(
+  value: unknown
+): string {
+  return String(
+    value ?? ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+export function hasPropertyProvider(
+  providerId: string
+): boolean {
+  return providers.has(
+    cleanProviderId(providerId)
+  );
+}
+
 export function getPropertyProvider(
   providerId: string =
     DEFAULT_PROVIDER_ID
 ): PropertyProvider {
+  const cleanedProviderId =
+    cleanProviderId(providerId) ||
+    DEFAULT_PROVIDER_ID;
+
   const provider =
-    providers.get(providerId);
+    providers.get(
+      cleanedProviderId
+    );
 
   if (!provider) {
     throw new Error(
-      `Unknown property provider: ${providerId}`
+      `Unknown property provider: ${cleanedProviderId}`
     );
   }
 
   return provider;
+}
+
+export function getPropertyProviderSummary(
+  providerId: string =
+    DEFAULT_PROVIDER_ID
+) {
+  const provider =
+    getPropertyProvider(
+      providerId
+    );
+
+  return {
+    id: provider.id,
+
+    displayName:
+      provider.displayName,
+
+    jurisdiction:
+      provider.jurisdiction,
+
+    source:
+      provider.source,
+  };
 }
 
 export function getAvailableProviders() {
@@ -54,6 +101,9 @@ export function getAvailableProviders() {
 
     jurisdiction:
       provider.jurisdiction,
+
+    source:
+      provider.source,
   }));
 }
 

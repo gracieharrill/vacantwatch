@@ -4,15 +4,30 @@ import {
 } from "next/server";
 
 import {
+  DEFAULT_PROVIDER_ID,
+  getAvailableProviders,
   getPropertyById,
+  getPropertyProviderSummary,
   getPropertySource,
+  hasPropertyProvider,
   normalizeParcelId,
 } from "../../../../lib/property/service";
 
 export const runtime = "nodejs";
 
+function parseProviderId(
+  value: string | null
+): string {
+  return (
+    value
+      ?.trim()
+      .toLowerCase() ||
+    DEFAULT_PROVIDER_ID
+  );
+}
+
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
 
   {
     params,
@@ -23,11 +38,42 @@ export async function GET(
   }
 ) {
   try {
+    const providerId =
+      parseProviderId(
+        request.nextUrl
+          .searchParams
+          .get("provider")
+      );
+
+    if (
+      !hasPropertyProvider(
+        providerId
+      )
+    ) {
+      return NextResponse.json(
+        {
+          property: null,
+
+          error:
+            `Unknown property provider: ${providerId}`,
+
+          availableProviders:
+            getAvailableProviders(),
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
     const { id } =
       await params;
 
     const parcelId =
-      normalizeParcelId(id);
+      normalizeParcelId(
+        id,
+        providerId
+      );
 
     if (!parcelId) {
       return NextResponse.json(
@@ -35,7 +81,12 @@ export async function GET(
           property: null,
 
           error:
-            "Parcel ID must contain at least 10 digits.",
+            "Parcel ID is not valid for the selected provider.",
+
+          provider:
+            getPropertyProviderSummary(
+              providerId
+            ),
         },
         {
           status: 400,
@@ -45,7 +96,8 @@ export async function GET(
 
     const property =
       await getPropertyById(
-        parcelId
+        parcelId,
+        providerId
       );
 
     if (!property) {
@@ -54,7 +106,12 @@ export async function GET(
           property: null,
 
           error:
-            "No matching tax-delinquent parcel was found.",
+            "No matching property was found.",
+
+          provider:
+            getPropertyProviderSummary(
+              providerId
+            ),
         },
         {
           status: 404,
@@ -64,8 +121,16 @@ export async function GET(
 
     return NextResponse.json({
       property,
+
+      provider:
+        getPropertyProviderSummary(
+          providerId
+        ),
+
       source:
-        getPropertySource(),
+        getPropertySource(
+          providerId
+        ),
     });
   } catch (error) {
     const message =
