@@ -6,6 +6,7 @@ import type {
 
 import type {
   PropertyListResult,
+  PropertyMapBounds,
   PropertyProvider,
   PropertyQueryOptions,
 } from "../provider";
@@ -256,6 +257,42 @@ function assertNoArcGisError(
   );
 }
 
+function addBoundsParameters(
+  parameters: URLSearchParams,
+  bounds:
+    | PropertyMapBounds
+    | undefined
+): void {
+  if (!bounds) {
+    return;
+  }
+
+  parameters.set(
+    "geometry",
+    [
+      bounds.west,
+      bounds.south,
+      bounds.east,
+      bounds.north,
+    ].join(",")
+  );
+
+  parameters.set(
+    "geometryType",
+    "esriGeometryEnvelope"
+  );
+
+  parameters.set(
+    "inSR",
+    "4326"
+  );
+
+  parameters.set(
+    "spatialRel",
+    "esriSpatialRelIntersects"
+  );
+}
+
 function buildWhereClause(
   options: PropertyQueryOptions
 ): string {
@@ -263,20 +300,16 @@ function buildWhereClause(
     options.signal ?? "all";
 
   /*
-   * Spokane currently supports ordinary parcel
-   * browsing and the generic "potential" signal.
+   * Spokane currently supports ordinary neutral
+   * parcel browsing. It does not yet assign vacancy,
+   * delinquency, blight, or potential-risk signals.
    */
-  /*
- * Spokane currently supports ordinary neutral
- * parcel browsing. It does not yet assign vacancy,
- * delinquency, blight, or potential-risk signals.
- */
-if (
-  signal !== "all" &&
-  signal !== "parcel"
-) {
-  return "1=0";
-}
+  if (
+    signal !== "all" &&
+    signal !== "parcel"
+  ) {
+    return "1=0";
+  }
 
   const conditions = [
     "PID_NUM IS NOT NULL",
@@ -347,7 +380,9 @@ if (
 }
 
 async function fetchParcelCount(
-  where: string
+  where: string,
+  bounds?:
+    PropertyMapBounds
 ): Promise<number> {
   const parameters =
     new URLSearchParams({
@@ -355,6 +390,11 @@ async function fetchParcelCount(
       returnCountOnly: "true",
       f: "json",
     });
+
+  addBoundsParameters(
+    parameters,
+    bounds
+  );
 
   const response =
     await fetchArcGisJson<
@@ -379,10 +419,13 @@ async function fetchParcelFeatures({
   where,
   limit,
   offset,
+  bounds,
 }: {
   where: string;
   limit: number;
   offset: number;
+  bounds?:
+    PropertyMapBounds;
 }): Promise<ArcGisFeature[]> {
   const parameters =
     new URLSearchParams({
@@ -406,6 +449,11 @@ async function fetchParcelFeatures({
       geometryPrecision: "7",
       f: "json",
     });
+
+  addBoundsParameters(
+    parameters,
+    bounds
+  );
 
   const response =
     await fetchArcGisJson<
@@ -713,18 +761,27 @@ export async function getSpokaneCountyProperties(
     unfilteredTotalProperties,
     features,
   ] = await Promise.all([
-    fetchParcelCount(where),
+    fetchParcelCount(
+      where,
+      options.bounds
+    ),
 
     where === baseWhere
-      ? fetchParcelCount(where)
+      ? fetchParcelCount(
+          where,
+          options.bounds
+        )
       : fetchParcelCount(
-          baseWhere
+          baseWhere,
+          options.bounds
         ),
 
     fetchParcelFeatures({
       where,
       limit,
       offset,
+      bounds:
+        options.bounds,
     }),
   ]);
 
@@ -757,6 +814,9 @@ export async function getSpokaneCountyProperties(
         ).trim(),
 
       minOutstanding: 0,
+
+      bounds:
+        options.bounds,
     },
 
     pagination: {
@@ -788,6 +848,10 @@ export async function getSpokaneCountyProperties(
 
     debug: {
       where,
+
+      bounds:
+        options.bounds,
+
       featuresReturned:
         features.length,
 
@@ -872,7 +936,7 @@ export const spokaneCountyProvider = {
      */
     taxDelinquency: false,
     vacancyCandidates: false,
-    mapBounds: false,
+    mapBounds: true,
   },
 
   normalizeParcelId:

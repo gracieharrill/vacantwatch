@@ -4,12 +4,20 @@ import type {
   PropertySignal,
 } from "./types";
 
+export type PropertyMapBounds = {
+  west: number;
+  south: number;
+  east: number;
+  north: number;
+};
+
 export type PropertyQueryOptions = {
   limit?: number;
   offset?: number;
   signal?: PropertySignal | "all";
   minOutstanding?: number;
   query?: string;
+  bounds?: PropertyMapBounds;
 };
 
 /*
@@ -35,10 +43,6 @@ export type PropertyJurisdiction = {
   countyFips: string;
 };
 
-/*
- * These flags describe which features a provider
- * can support with its available datasets.
- */
 export type PropertyProviderCapabilities = {
   parcelSearch: boolean;
   propertyDetails: boolean;
@@ -50,7 +54,6 @@ export type PropertyProviderCapabilities = {
 export type PropertyProvider = {
   id: string;
   displayName: string;
-
   jurisdiction: PropertyJurisdiction;
   source: PropertySourceInfo;
   capabilities: PropertyProviderCapabilities;

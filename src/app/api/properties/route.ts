@@ -11,6 +11,10 @@ import {
 } from "../../../lib/property/service";
 
 import type {
+  PropertyMapBounds,
+} from "../../../lib/property/provider";
+
+import type {
   PropertySignal,
 } from "../../../lib/property/types";
 
@@ -18,11 +22,19 @@ export const runtime = "nodejs";
 
 const validSignals =
   new Set<PropertySignal>([
+    "parcel",
     "vacant",
     "tax-delinquent",
     "blighted",
     "potential",
   ]);
+
+class InvalidMapBoundsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidMapBoundsError";
+  }
+}
 
 function parseInteger(
   value: string | null,
@@ -87,6 +99,97 @@ function parseProviderId(
       .toLowerCase() ||
     DEFAULT_PROVIDER_ID
   );
+}
+
+function parseMapBounds(
+  searchParams: URLSearchParams
+): PropertyMapBounds | undefined {
+  const rawBounds = {
+    west: searchParams.get("west"),
+    south: searchParams.get("south"),
+    east: searchParams.get("east"),
+    north: searchParams.get("north"),
+  };
+
+  const suppliedValues =
+    Object.values(rawBounds);
+
+  const anyBoundsSupplied =
+    suppliedValues.some(
+      (value) => value !== null
+    );
+
+  if (!anyBoundsSupplied) {
+    return undefined;
+  }
+
+  const allBoundsSupplied =
+    suppliedValues.every(
+      (value) => value !== null
+    );
+
+  if (!allBoundsSupplied) {
+    throw new InvalidMapBoundsError(
+      "Map bounds require west, south, east, and north."
+    );
+  }
+
+  const west = Number(rawBounds.west);
+  const south = Number(rawBounds.south);
+  const east = Number(rawBounds.east);
+  const north = Number(rawBounds.north);
+
+  if (
+    !Number.isFinite(west) ||
+    !Number.isFinite(south) ||
+    !Number.isFinite(east) ||
+    !Number.isFinite(north)
+  ) {
+    throw new InvalidMapBoundsError(
+      "Map bounds must contain valid numbers."
+    );
+  }
+
+  if (
+    west < -180 ||
+    west > 180 ||
+    east < -180 ||
+    east > 180
+  ) {
+    throw new InvalidMapBoundsError(
+      "West and east must be between -180 and 180."
+    );
+  }
+
+  if (
+    south < -90 ||
+    south > 90 ||
+    north < -90 ||
+    north > 90
+  ) {
+    throw new InvalidMapBoundsError(
+      "South and north must be between -90 and 90."
+    );
+  }
+
+  if (west >= east) {
+    throw new InvalidMapBoundsError(
+      "West must be less than east."
+    );
+  }
+
+  if (south >= north) {
+    throw new InvalidMapBoundsError(
+      "South must be less than north."
+    );
+  }
+
+  return {
+    west,
+    south,
+    east,
+    north,
+  };
 }
 
 export async function GET(
@@ -154,6 +257,11 @@ export async function GET(
         .trim()
         .slice(0, 100);
 
+    const bounds =
+      parseMapBounds(
+        searchParams
+      );
+
     const result =
       await getProperties(
         {
@@ -162,6 +270,7 @@ export async function GET(
           signal,
           minOutstanding,
           query,
+          bounds,
         },
         providerId
       );
@@ -180,6 +289,12 @@ export async function GET(
         ? error.message
         : "Unable to load properties";
 
+    const status =
+      error instanceof
+        InvalidMapBoundsError
+        ? 400
+        : 500;
+
     return NextResponse.json(
       {
         properties: [],
@@ -187,7 +302,7 @@ export async function GET(
         error: message,
       },
       {
-        status: 500,
+        status,
       }
     );
   }
