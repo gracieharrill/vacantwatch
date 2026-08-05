@@ -14,17 +14,34 @@ import {
   kingCountyProvider,
 } from "./providers/king-county";
 
+import {
+  spokaneCountyProvider,
+} from "./providers/spokane-county";
+
 export const DEFAULT_PROVIDER_ID =
   "king-county";
 
+/*
+ * Explicit Map type parameters prevent TypeScript
+ * from assuming every provider must have the exact
+ * same source fields as King County.
+ */
 const providers:
   ReadonlyMap<
     string,
     PropertyProvider
-  > = new Map([
+  > = new Map<
+    string,
+    PropertyProvider
+  >([
     [
       kingCountyProvider.id,
       kingCountyProvider,
+    ],
+
+    [
+      spokaneCountyProvider.id,
+      spokaneCountyProvider,
     ],
   ]);
 
@@ -42,7 +59,9 @@ export function hasPropertyProvider(
   providerId: string
 ): boolean {
   return providers.has(
-    cleanProviderId(providerId)
+    cleanProviderId(
+      providerId
+    )
   );
 }
 
@@ -51,7 +70,9 @@ export function getPropertyProvider(
     DEFAULT_PROVIDER_ID
 ): PropertyProvider {
   const cleanedProviderId =
-    cleanProviderId(providerId) ||
+    cleanProviderId(
+      providerId
+    ) ||
     DEFAULT_PROVIDER_ID;
 
   const provider =
@@ -154,15 +175,16 @@ export async function getProperties(
     );
   }
 
-  if (
+  const requestsTaxDelinquency =
+    options.signal ===
+      "tax-delinquent" ||
     (
-      options.signal ===
-        "tax-delinquent" ||
-      (
-        options.minOutstanding ??
-        0
-      ) > 0
-    ) &&
+      options.minOutstanding ??
+      0
+    ) > 0;
+
+  if (
+    requestsTaxDelinquency &&
     !provider.capabilities
       .taxDelinquency
   ) {
