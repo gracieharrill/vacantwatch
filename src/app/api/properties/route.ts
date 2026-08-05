@@ -8,6 +8,7 @@ import {
   getAvailableProviders,
   getProperties,
   hasPropertyProvider,
+  UnsupportedPropertyCapabilityError,
 } from "../../../lib/property/service";
 
 import type {
@@ -29,28 +30,54 @@ const validSignals =
     "potential",
   ]);
 
-class InvalidMapBoundsError extends Error {
+class InvalidPropertyQueryError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "InvalidMapBoundsError";
+    this.name =
+      "InvalidPropertyQueryError";
   }
 }
 
 function parseInteger(
   value: string | null,
-  fallback: number
+  fallback: number,
+  parameterName: string,
+  minimum: number,
+  maximum?: number
 ): number {
   if (value === null) {
     return fallback;
   }
 
-  const result = Number(value);
+  const trimmedValue =
+    value.trim();
+
+  const result =
+    Number(trimmedValue);
 
   if (
+    trimmedValue.length === 0 ||
     !Number.isFinite(result) ||
     !Number.isInteger(result)
   ) {
-    return fallback;
+    throw new InvalidPropertyQueryError(
+      `${parameterName} must be an integer.`
+    );
+  }
+
+  if (result < minimum) {
+    throw new InvalidPropertyQueryError(
+      `${parameterName} must be at least ${minimum}.`
+    );
+  }
+
+  if (
+    maximum !== undefined &&
+    result > maximum
+  ) {
+    throw new InvalidPropertyQueryError(
+      `${parameterName} must not exceed ${maximum}.`
+    );
   }
 
   return result;
@@ -59,17 +86,29 @@ function parseInteger(
 function parseMoney(
   value: string | null
 ): number {
-  if (value === null) {
+  if (
+    value === null ||
+    value.trim().length === 0
+  ) {
     return 0;
   }
 
-  const result = Number(value);
+  const result =
+    Number(value);
 
   if (!Number.isFinite(result)) {
-    return 0;
+    throw new InvalidPropertyQueryError(
+      "minOutstanding must be a valid number."
+    );
   }
 
-  return Math.max(result, 0);
+  if (result < 0) {
+    throw new InvalidPropertyQueryError(
+      "minOutstanding must be zero or greater."
+    );
+  }
+
+  return result;
 }
 
 function parseSignal(
@@ -87,7 +126,9 @@ function parseSignal(
     return value as PropertySignal;
   }
 
-  return "all";
+  throw new InvalidPropertyQueryError(
+    `Unsupported signal filter: ${value}`
+  );
 }
 
 function parseProviderId(
@@ -99,6 +140,22 @@ function parseProviderId(
       .toLowerCase() ||
     DEFAULT_PROVIDER_ID
   );
+}
+
+function parseQuery(
+  value: string | null
+): string {
+  const query =
+    String(value ?? "")
+      .trim();
+
+  if (query.length > 100) {
+    throw new InvalidPropertyQueryError(
+      "q must not exceed 100 characters."
+    );
+  }
+
+  return query;
 }
 
 function parseMapBounds(
@@ -129,7 +186,7 @@ function parseMapBounds(
     );
 
   if (!allBoundsSupplied) {
-    throw new InvalidMapBoundsError(
+    throw new InvalidPropertyQueryError(
       "Map bounds require west, south, east, and north."
     );
   }
@@ -145,7 +202,7 @@ function parseMapBounds(
     !Number.isFinite(east) ||
     !Number.isFinite(north)
   ) {
-    throw new InvalidMapBoundsError(
+    throw new InvalidPropertyQueryError(
       "Map bounds must contain valid numbers."
     );
   }
@@ -156,7 +213,7 @@ function parseMapBounds(
     east < -180 ||
     east > 180
   ) {
-    throw new InvalidMapBoundsError(
+    throw new InvalidPropertyQueryError(
       "West and east must be between -180 and 180."
     );
   }
@@ -167,19 +224,19 @@ function parseMapBounds(
     north < -90 ||
     north > 90
   ) {
-    throw new InvalidMapBoundsError(
+    throw new InvalidPropertyQueryError(
       "South and north must be between -90 and 90."
     );
   }
 
   if (west >= east) {
-    throw new InvalidMapBoundsError(
+    throw new InvalidPropertyQueryError(
       "West must be less than east."
     );
   }
 
   if (south >= north) {
-    throw new InvalidMapBoundsError(
+    throw new InvalidPropertyQueryError(
       "South must be less than north."
     );
   }
@@ -190,6 +247,17 @@ function parseMapBounds(
     east,
     north,
   };
+}
+
+function isClientRequestError(
+  error: unknown
+): error is Error {
+  return (
+    error instanceof
+      InvalidPropertyQueryError ||
+    error instanceof
+      UnsupportedPropertyCapabilityError
+  );
 }
 
 export async function GET(
@@ -230,11 +298,16 @@ export async function GET(
 
     const limit = parseInteger(
       searchParams.get("limit"),
-      100
+      100,
+      "limit",
+      1,
+      2000
     );
 
     const offset = parseInteger(
       searchParams.get("offset"),
+      0,
+      "offset",
       0
     );
 
@@ -250,12 +323,9 @@ export async function GET(
       );
 
     const query =
-      String(
-        searchParams.get("q") ??
-          ""
-      )
-        .trim()
-        .slice(0, 100);
+      parseQuery(
+        searchParams.get("q")
+      );
 
     const bounds =
       parseMapBounds(
@@ -279,21 +349,37 @@ export async function GET(
       result
     );
   } catch (error) {
-    console.error(
-      "Property list API error:",
-      error
-    );
-
     const message =
       error instanceof Error
         ? error.message
         : "Unable to load properties";
 
-    const status =
-      error instanceof
-        InvalidMapBoundsError
-        ? 400
-        : 500;
+    if (
+      isClientRequestError(
+        error
+      )
+    ) {
+      console.warn(
+        "Property list request rejected:",
+        message
+      );
+
+      return NextResponse.json(
+        {
+          properties: [],
+          count: 0,
+          error: message,
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    console.error(
+      "Property list API error:",
+      error
+    );
 
     return NextResponse.json(
       {
@@ -302,7 +388,7 @@ export async function GET(
         error: message,
       },
       {
-        status,
+        status: 500,
       }
     );
   }

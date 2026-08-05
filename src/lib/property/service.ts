@@ -1,5 +1,6 @@
 import type {
   PropertyDetail,
+  PropertySignal,
 } from "./types";
 
 import type {
@@ -20,6 +21,14 @@ import {
 
 export const DEFAULT_PROVIDER_ID =
   "king-county";
+
+export class UnsupportedPropertyCapabilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name =
+      "UnsupportedPropertyCapabilityError";
+  }
+}
 
 const providers:
   ReadonlyMap<
@@ -48,6 +57,19 @@ function cleanProviderId(
   )
     .trim()
     .toLowerCase();
+}
+
+function isVacancyCandidateSignal(
+  signal:
+    PropertySignal |
+    "all" |
+    undefined
+): boolean {
+  return (
+    signal === "vacant" ||
+    signal === "blighted" ||
+    signal === "potential"
+  );
 }
 
 export function hasPropertyProvider(
@@ -161,17 +183,29 @@ export async function getProperties(
     !provider.capabilities
       .parcelSearch
   ) {
-    throw new Error(
+    throw new UnsupportedPropertyCapabilityError(
       `${provider.displayName} does not support parcel searching.`
     );
   }
 
   if (
-    options.signal === "vacant" &&
+    options.bounds &&
+    !provider.capabilities
+      .mapBounds
+  ) {
+    throw new UnsupportedPropertyCapabilityError(
+      `${provider.displayName} does not support visible-map bounds searching.`
+    );
+  }
+
+  if (
+    isVacancyCandidateSignal(
+      options.signal
+    ) &&
     !provider.capabilities
       .vacancyCandidates
   ) {
-    throw new Error(
+    throw new UnsupportedPropertyCapabilityError(
       `${provider.displayName} does not support vacancy-candidate filtering.`
     );
   }
@@ -189,7 +223,7 @@ export async function getProperties(
     !provider.capabilities
       .taxDelinquency
   ) {
-    throw new Error(
+    throw new UnsupportedPropertyCapabilityError(
       `${provider.displayName} does not support tax-delinquency filtering.`
     );
   }
@@ -235,7 +269,7 @@ export async function getPropertyById(
     !provider.capabilities
       .propertyDetails
   ) {
-    throw new Error(
+    throw new UnsupportedPropertyCapabilityError(
       `${provider.displayName} does not support property details.`
     );
   }
