@@ -13,6 +13,7 @@ import {
   Filter,
   Search,
   X,
+  ZoomIn,
 } from "lucide-react";
 
 import type {
@@ -91,6 +92,7 @@ type PropertyPageResponse = {
   count: number;
   pagination: PaginationInfo;
   error?: string;
+  code?: string;
 };
 
 type PropertyDetailResponse = {
@@ -135,7 +137,7 @@ const fallbackProvider:
       propertyDetails: true,
       taxDelinquency: true,
       vacancyCandidates: true,
-      mapBounds: false,
+      mapBounds: true,
     },
 
     map: {
@@ -144,7 +146,7 @@ const fallbackProvider:
         lng: -122.3321,
       },
 
-      defaultZoom: 10,
+      defaultZoom: 13,
     },
   };
 
@@ -248,6 +250,53 @@ function isAbortError(
       DOMException &&
     error.name ===
       "AbortError"
+  );
+}
+
+class PropertyPageRequestError extends Error {
+  status: number;
+  code?: string;
+
+  constructor(
+    message: string,
+    status: number,
+    code?: string
+  ) {
+    super(message);
+
+    this.name =
+      "PropertyPageRequestError";
+
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function isZoomGuidanceError(
+  error: unknown
+): error is PropertyPageRequestError {
+  if (
+    !(error instanceof
+      PropertyPageRequestError)
+  ) {
+    return false;
+  }
+
+  if (
+    error.code ===
+    "MAP_AREA_TOO_LARGE"
+  ) {
+    return true;
+  }
+
+  return (
+    error.status === 400 &&
+    /visible .*map area contains [\d,]+ parcels/i.test(
+      error.message
+    ) &&
+    /zoom in/i.test(
+      error.message
+    )
   );
 }
 
@@ -364,9 +413,11 @@ async function fetchPropertyPage({
       PropertyPageResponse;
 
   if (!response.ok) {
-    throw new Error(
+    throw new PropertyPageRequestError(
       data.error ||
-        "Unable to load properties"
+        "Unable to load properties",
+      response.status,
+      data.code
     );
   }
 
@@ -441,6 +492,11 @@ export default function Home() {
   const [
     error,
     setError,
+  ] = useState("");
+
+  const [
+    zoomGuidance,
+    setZoomGuidance,
   ] = useState("");
 
   const [
@@ -686,6 +742,7 @@ export default function Home() {
     ) {
       setLoading(true);
       setError("");
+      setZoomGuidance("");
       setProperties([]);
       setNextOffset(0);
       setHasMoreProperties(
@@ -705,6 +762,7 @@ export default function Home() {
       try {
         setLoading(true);
         setError("");
+        setZoomGuidance("");
         setLoadMoreError("");
         setProperties([]);
         setNextOffset(0);
@@ -766,9 +824,29 @@ export default function Home() {
           return;
         }
 
+        if (
+          isZoomGuidanceError(
+            requestError
+          )
+        ) {
+          console.info(
+            "[VacantWatch] Zoom guidance:",
+            requestError.message
+          );
+
+          setZoomGuidance(
+            requestError.message
+          );
+
+          setError("");
+          return;
+        }
+
         console.error(
           requestError
         );
+
+        setZoomGuidance("");
 
         setError(
           requestError instanceof
@@ -1081,6 +1159,24 @@ export default function Home() {
     } catch (
       requestError
     ) {
+      if (
+        isZoomGuidanceError(
+          requestError
+        )
+      ) {
+        console.info(
+          "[VacantWatch] Zoom guidance:",
+          requestError.message
+        );
+
+        setZoomGuidance(
+          requestError.message
+        );
+
+        setLoadMoreError("");
+        return;
+      }
+
       console.error(
         requestError
       );
@@ -1140,6 +1236,7 @@ export default function Home() {
     setPropertyDetail(null);
     setDetailError("");
     setLoadMoreError("");
+    setZoomGuidance("");
   }
 
   function selectProperty(
@@ -1442,13 +1539,36 @@ export default function Home() {
             </div>
           )}
 
-          {!loading && error && (
-            <div className="m-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              {error}
-            </div>
-          )}
+          {!loading &&
+            zoomGuidance && (
+              <div className="m-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                <div className="flex items-start gap-2">
+                  <ZoomIn className="mt-0.5 h-4 w-4 flex-none" />
+
+                  <div>
+                    <div className="font-semibold">
+                      Zoom in to load
+                      parcels
+                    </div>
+
+                    <div className="mt-1 text-xs leading-5 text-amber-800">
+                      {zoomGuidance}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
           {!loading &&
+            !zoomGuidance &&
+            error && (
+              <div className="m-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {error}
+              </div>
+            )}
+
+          {!loading &&
+            !zoomGuidance &&
             !error &&
             properties.length ===
               0 && (
@@ -1459,6 +1579,7 @@ export default function Home() {
             )}
 
           {!loading &&
+            !zoomGuidance &&
             !error &&
             properties.map(
               (property) => {
@@ -1532,6 +1653,7 @@ export default function Home() {
             )}
 
           {!loading &&
+            !zoomGuidance &&
             !error && (
             <div className="p-4">
               {loadMoreError && (
@@ -1596,6 +1718,35 @@ export default function Home() {
             handleMapBoundsChange
           }
         />
+
+        {!loading &&
+          zoomGuidance && (
+            <div className="pointer-events-none absolute inset-x-0 top-4 z-[900] flex justify-center px-4">
+              <div className="pointer-events-auto max-w-lg rounded-xl border border-amber-200 bg-white/95 px-4 py-3 text-sm text-slate-800 shadow-lg backdrop-blur">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-lg bg-amber-100 p-2 text-amber-800">
+                    <ZoomIn className="h-5 w-5" />
+                  </div>
+
+                  <div>
+                    <div className="font-semibold text-slate-900">
+                      Zoom in to load
+                      King County parcels
+                    </div>
+
+                    <div className="mt-1 leading-5 text-slate-600">
+                      The visible map area
+                      contains too many
+                      parcels. Zoom in or
+                      use the map controls;
+                      VacantWatch will retry
+                      automatically.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
 
         {selectedPropertyId && (
           <aside className="absolute inset-y-0 right-0 z-[1000] flex w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-2xl">
@@ -1965,15 +2116,15 @@ export default function Home() {
                                 >
                                   <td className="whitespace-nowrap px-3 py-3 text-slate-700">
                                     {taxRecord.billYear ??
-                                      "—"}
+                                      "â€”"}
                                   </td>
                                   <td className="whitespace-nowrap px-3 py-3 text-slate-700">
                                     {taxRecord.receivableType ??
-                                      "—"}
+                                      "â€”"}
                                   </td>
                                   <td className="whitespace-nowrap px-3 py-3 text-slate-700">
                                     {taxRecord.levyCode ??
-                                      "—"}
+                                      "â€”"}
                                   </td>
                                   <td className="whitespace-nowrap px-3 py-3 text-right font-medium text-slate-900">
                                     {currencyFormatter.format(
