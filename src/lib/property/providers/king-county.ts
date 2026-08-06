@@ -51,7 +51,7 @@ export const kingCountyProvider = {
       lng: -122.3321,
     },
 
-    defaultZoom: 14,
+    defaultZoom: 16,
   },
 
   normalizeParcelId:
